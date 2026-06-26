@@ -7,6 +7,7 @@ import json
 playlist_url = 'https://tidal.com/playlist/dd476c79-ace8-4fbc-846c-1794067fddec'
 cookies_path = 'cookies'
 cookies_file_name = 'tidal_cookies'
+work_dir = 'C:/Users/trist/Music/musicdl_outputs'
 cookies_full_path = cookies_path + '/' + cookies_file_name
 
 if __name__ == '__main__':
@@ -36,17 +37,29 @@ if __name__ == '__main__':
 
     music_client_cfg = {
             'TIDALMusicClient': {
-                'default_parse_cookies': tidal_cookies
+                'default_parse_cookies': tidal_cookies,
+                'work_dir': work_dir
+            },
+            'SpotifyMusicClient': {
+                'work_dir': work_dir
             }
+        }
+
+    clients_threadings = {
+            "TIDALMusicClient": 1
         }
     
     print("creating client...")
-    music_client = musicdl.MusicClient(music_sources=['TIDALMusicClient'], init_music_clients_cfg=music_client_cfg)
+    music_client = musicdl.MusicClient(['TIDALMusicClient', 'SpotifyMusicClient'], music_client_cfg, clients_threadings)
     
     while True:
         playlist_url = input("enter playlist url:")
         print("parsing playlist...")
         song_infos = music_client.parseplaylist(playlist_url)
+
+        num_songs = len(song_infos)
+        
+        print("found " + str(num_songs) + " in playlist")
 
         print("downloading...")
         music_client.download(song_infos)
