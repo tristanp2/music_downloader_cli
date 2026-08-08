@@ -88,8 +88,8 @@ prompted; it downloads every track as FLAC, then waits for the next URL.
   3. Default if neither is set: `~/Music/music_downloader_outputs`
 - `config/settings.conf` supports `~` for home and absolute paths. It is
   gitignored (machine-specific), so each machine sets its own path.
-- Tracks Deezer can't match are written to `missed_tracks.json` in the output
-  directory.
+- Tracks Deezer can't match are written to `missed_tracks.json` inside the
+  playlist's output folder.
 
 ## Notes
 
@@ -97,8 +97,15 @@ prompted; it downloads every track as FLAC, then waits for the next URL.
   Hi-Res.
 - The Deezer `arl` token expires when Deezer logs you out. Re-grab the cookie
   and update `deezer.arl` to resume downloads.
-- `config/config.json` holds deemix's download settings (filename template,
-  etc.)  --  edit there if you want different file naming.
+- **File naming is handled by the script, not `config/config.json`.** Each
+  downloaded track is renamed to `NN - Artist - Title.flac` (zero-padded
+  playlist position) and tagged with the Vorbis `TRACKNUMBER` comment = `NN`,
+  so players like the Denon Prime 4 keep the original Spotify playlist order
+  (a missed track leaves a gap rather than re-numbering). `config/config.json`
+  is deemix's auto-generated state (gitignored); the script overrides its
+  folder and naming settings at runtime, so do not edit it for naming.
+- **Flat layout:** downloads are written directly into the playlist folder
+  (no artist/album subfolders), which the script also forces at runtime.
 
 ## .gitignore
 
