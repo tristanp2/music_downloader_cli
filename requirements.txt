@@ -4,3 +4,4 @@
 # distribution is `deezer-py`.
 deezer-py
 deemix==3.6.6
+rich

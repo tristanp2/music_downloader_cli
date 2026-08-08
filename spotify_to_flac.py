@@ -9,7 +9,8 @@ Fallback:       none in-script  --  tracks Deezer can't match are logged to
 Flow per run:
   1. Paste a Spotify playlist/album URL (loop; 'quit'/'exit'/Enter/Ctrl-C to stop).
   2. Parse the playlist via the Spotify Web API (user auth, cached token).
-  3. For each track: search Deezer -> download FLAC via deemix (-b flac).
+  3. For each track: search Deezer -> download FLAC via the deemix library,
+     with a real per-track progress bar.
   4. Tracks Deezer can't match are logged to missed_tracks.json.
 
 Credentials (all gitignored, never committed):
@@ -23,7 +24,6 @@ import os
 import sys
 import re
 import json
-import subprocess
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -31,6 +31,14 @@ import http.server
 import threading
 import time
 from pathlib import Path
+
+# Deezer + deemix used as libraries (not via subprocess) so we can drive a
+# real per-track progress bar through deemix's listener interface.
+from deezer import Deezer, TrackFormats
+from deemix import generateDownloadObject
+from deemix.settings import load as loadSettings
+from deemix.downloader import Downloader
+from rich.progress import Progress, BarColumn, TextColumn, TaskProgressColumn
 
 # ---- paths -----------------------------------------------------------------
 REPO = Path(__file__).resolve().parent
@@ -246,13 +254,41 @@ def safe_folder_name(name):
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned[:80] or None
 
-def deezer_search(arl, query):
-    """Return the best Deezer track dict for a query, or None."""
-    import importlib
-    deezer = importlib.import_module("deezer")
-    dz = deezer.Deezer()
-    if not dz.login_via_arl(arl):
-        return None
+class ProgressListener:
+    """Bridge deemix's listener interface to a rich progress bar.
+
+    deemix calls .send(key, value). We render a per-track bar from the
+    'updateQueue' event (value['progress'] is 0-100 for the current track).
+    Other events are shown as soft status lines so nothing is silently dropped.
+    """
+    def __init__(self, progress, task_id, label):
+        self.progress = progress
+        self.task_id = task_id
+        self.label = label
+
+    def send(self, key, value=None):
+        if key == "updateQueue" and isinstance(value, dict):
+            pct = value.get("progress")
+            if isinstance(pct, (int, float)):
+                self.progress.update(self.task_id, completed=int(pct))
+                return
+        if key == "downloadInfo" and isinstance(value, dict):
+            state = value.get("state")
+            if state in ("downloading", "getBitrate", "getTags", "getAlbumArt",
+                         "tagging", "downloaded", "alreadyDownloaded"):
+                # keep the bar's description in sync with the current phase
+                self.progress.update(self.task_id, description=f"{self.label} [{state}]")
+            return
+        # fall back to deemix's own human-readable line for anything else
+        from deemix.utils import formatListener
+        line = formatListener(key, value)
+        if line:
+            self.progress.console.print(f"    {line}")
+
+
+def deezer_search(dz, query):
+    """Return the best Deezer track dict for a query, or None. Uses a shared
+    Deezer session (dz) rather than logging in per call."""
     try:
         res = dz.api.search(query)
     except Exception:
@@ -260,13 +296,33 @@ def deezer_search(arl, query):
     data = res.get("data") or []
     return data[0] if data else None
 
-def deemix_download(url, out_dir):
-    """Download a Deezer URL as FLAC via deemix (portable config). Returns True on success."""
+
+def deemix_download(dz, deezer_url, settings, out_dir, label):
+    """Download a Deezer URL as FLAC via the deemix library (not subprocess).
+    Drives a real per-track progress bar. Returns True on success."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [sys.executable, "-m", "deemix", "--portable",
-           "-b", "flac", "-p", str(out_dir), url]
-    r = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True, timeout=300)
-    return "All done" in r.stdout or "Completed download" in r.stdout
+    # set the output location at runtime (the -p equivalent)
+    settings["downloadLocation"] = str(out_dir)
+    try:
+        download_object = generateDownloadObject(dz, deezer_url, TrackFormats.FLAC,
+                                                  None, None)
+    except Exception as e:
+        print(f"    [deezer] generate failed: {e}")
+        return False
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        transient=True,
+    ) as progress:
+        task_id = progress.add_task(label, total=100)
+        listener = ProgressListener(progress, task_id, label)
+        try:
+            Downloader(dz, download_object, settings, listener=listener).start()
+        except Exception as e:
+            print(f"    [deezer] download failed: {e}")
+            return False
+    return True
 
 def resolve_output_dir():
     """Output base dir precedence: env MUSIC_DOWNLOADER_OUT > config/settings.conf
@@ -287,6 +343,12 @@ def main():
     sync_deezer_arl()  # single source of truth -> config/.arl for deemix
     WORK_DIR = resolve_output_dir()
     WORK_DIR.mkdir(parents=True, exist_ok=True)
+
+    # One Deezer session + deemix settings for the whole run (library mode).
+    dz = Deezer()
+    if not dz.login_via_arl(arl_text):
+        die("Deezer ARL login failed (token in deezer.arl may be expired).")
+    settings = loadSettings(REPO / "config")
 
     print("=== Spotify -> FLAC (Deezer) ===")
     print("Paste a Spotify playlist/album URL. 'quit'/'exit'/Enter/Ctrl-C to stop.\n")
@@ -338,8 +400,9 @@ def main():
         missed = []
         for i, t in enumerate(tracks, 1):
             q = f"{' '.join(t['artists'])} {t['name']}"
-            print(f"[{i}/{len(tracks)}] {q}")
-            hit = deezer_search(arl_text, q)
+            label = f"[{i}/{len(tracks)}] {q[:60]}"
+            print(f"{label}")
+            hit = deezer_search(dz, q)
             if not hit:
                 print("    [deezer] no match")
                 missed.append(t)
@@ -348,8 +411,8 @@ def main():
             if not dz_url:
                 missed.append(t)
                 continue
-            # download into the playlist-named subfolder
-            if deemix_download(dz_url, out_dir):
+            # download into the playlist-named subfolder, with a progress bar
+            if deemix_download(dz, dz_url, settings, out_dir, label):
                 print("    [deezer] FLAC downloaded")
             else:
                 print("    [deezer] download failed")
