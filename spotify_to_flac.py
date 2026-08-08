@@ -400,7 +400,13 @@ def main():
         missed = []
         for i, t in enumerate(tracks, 1):
             q = f"{' '.join(t['artists'])} {t['name']}"
-            label = f"[{i}/{len(tracks)}] {q[:60]}"
+            # display label: "Artist - Title" with a dash separator (search keeps q)
+            artist_part = " - ".join(t['artists'])
+            if artist_part:
+                display = f"{artist_part} - {t['name']}"
+            else:
+                display = t['name']
+            label = f"[{i}/{len(tracks)}] {display[:60]}"
             print(f"{label}")
             hit = deezer_search(dz, q)
             if not hit:
@@ -419,7 +425,8 @@ def main():
                 missed.append(t)
 
         if missed:
-            log = WORK_DIR / "missed_tracks.json"
+            out_dir.mkdir(parents=True, exist_ok=True)  # ensure it exists even if 0 downloads
+            log = out_dir / "missed_tracks.json"
             prev = json.loads(log.read_text()) if log.is_file() else []
             prev.extend(missed)
             log.write_text(json.dumps(prev, indent=2, ensure_ascii=False), encoding="utf-8")
