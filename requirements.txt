@@ -1,0 +1,6 @@
+# Runtime deps for spotify_to_flac.py (verified 2026-08-07).
+# Install into a venv:  pip install -r requirements.txt
+# Note: the Deezer API client imports as `deezer` but its PyPI
+# distribution is `deezer-py`.
+deezer-py
+deemix==3.6.6
