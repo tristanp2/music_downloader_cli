@@ -211,6 +211,7 @@ def parse_spotify_playlist(token, playlist_id):
     pl = _spotify_api_get(token, f"https://api.spotify.com/v1/playlists/{playlist_id}")
     name = pl.get("name", playlist_id)
     tracks = []
+    position = 0
     page = extract_container(pl)
     while isinstance(page, dict):
         for item in page.get("items", []) or []:
@@ -222,7 +223,8 @@ def parse_spotify_playlist(token, playlist_id):
             tn = (t.get("name") or "").strip()
             arts = [(a.get("name") or "").strip() for a in t.get("artists", [])]
             if tn:
-                tracks.append({"name": tn, "artists": arts})
+                position += 1
+                tracks.append({"name": tn, "artists": arts, "position": position})
         url = page.get("next")
         if not url:
             break
@@ -299,16 +301,21 @@ def deezer_search(dz, query):
 
 def deemix_download(dz, deezer_url, settings, out_dir, label):
     """Download a Deezer URL as FLAC via the deemix library (not subprocess).
-    Drives a real per-track progress bar. Returns True on success."""
+    Forces a FLAT layout (no artist/album subfolders) so the file lands directly
+    in out_dir, which keeps playlist ordering sane for players like the Denon
+    Prime 4. Returns the downloaded FLAC path, or None on failure."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    # set the output location at runtime (the -p equivalent)
+    # set the output location + flat layout at runtime (override config.json)
     settings["downloadLocation"] = str(out_dir)
+    for key in ("createArtistFolder", "createAlbumFolder", "createSingleFolder",
+                "createCDFolder", "createStructurePlaylist"):
+        settings[key] = False
     try:
         download_object = generateDownloadObject(dz, deezer_url, TrackFormats.FLAC,
                                                   None, None)
     except Exception as e:
         print(f"    [deezer] generate failed: {e}")
-        return False
+        return None
     with Progress(
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
@@ -321,8 +328,47 @@ def deemix_download(dz, deezer_url, settings, out_dir, label):
             Downloader(dz, download_object, settings, listener=listener).start()
         except Exception as e:
             print(f"    [deezer] download failed: {e}")
-            return False
-    return True
+            return None
+    # find the FLAC we just pulled (most recently modified .flac in out_dir)
+    flacs = sorted(out_dir.glob("*.flac"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return flacs[0] if flacs else None
+
+def tag_and_rename(flac_path, position, total):
+    """Rename <name>.flac -> 'NN - <name>.flac' and set the Vorbis TRACKNUMBER
+    comment to the Spotify playlist position (NN). FLAC uses Vorbis comments,
+    NOT the ID3 'TRCK' key -- Windows Explorer's '#' column and the Denon Prime
+    4 both read TRACKNUMBER, so we write that (and clear any stale TRCK).
+    Idempotent: if already prefixed, just ensures the tag is correct."""
+    from mutagen.flac import FLAC
+    try:
+        nn = f"{position:0{len(str(total))}d}"  # zero-padded, width = digits in total
+    except Exception:
+        nn = str(position)
+    # already prefixed? just fix the tag if needed
+    if flac_path.stem.startswith(nn + " - "):
+        try:
+            audio = FLAC(str(flac_path))
+            audio["TRACKNUMBER"] = nn
+            if "TRCK" in audio:
+                del audio["TRCK"]
+            audio.save()
+        except Exception:
+            pass
+        return flac_path
+    new_path = flac_path.with_name(f"{nn} - {flac_path.name}")
+    # avoid clobbering an existing prefixed file
+    if new_path.exists() and new_path != flac_path:
+        return flac_path
+    flac_path.rename(new_path)
+    try:
+        audio = FLAC(str(new_path))
+        audio["TRACKNUMBER"] = nn
+        if "TRCK" in audio:
+            del audio["TRCK"]
+        audio.save()
+    except Exception:
+        pass  # tag best-effort; rename already done
+    return new_path
 
 def resolve_output_dir():
     """Output base dir precedence: env MUSIC_DOWNLOADER_OUT > config/settings.conf
@@ -406,7 +452,9 @@ def main():
                 display = f"{artist_part} - {t['name']}"
             else:
                 display = t['name']
-            label = f"[{i}/{len(tracks)}] {display[:60]}"
+            # display label uses the ORIGINAL Spotify playlist position (gaps kept)
+            pos = t["position"]
+            label = f"[{pos}/{len(tracks)}] {display[:60]}"
             print(f"{label}")
             hit = deezer_search(dz, q)
             if not hit:
@@ -417,9 +465,12 @@ def main():
             if not dz_url:
                 missed.append(t)
                 continue
-            # download into the playlist-named subfolder, with a progress bar
-            if deemix_download(dz, dz_url, settings, out_dir, label):
-                print("    [deezer] FLAC downloaded")
+            # download (flat), then rename + tag with the original position so the
+            # Denon Prime 4 keeps the true playlist order even when tracks are missed
+            flac = deemix_download(dz, dz_url, settings, out_dir, label)
+            if flac:
+                final = tag_and_rename(flac, pos, len(tracks))
+                print(f"    [deezer] FLAC downloaded -> {final.name}")
             else:
                 print("    [deezer] download failed")
                 missed.append(t)
