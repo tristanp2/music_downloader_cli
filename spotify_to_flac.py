@@ -363,8 +363,6 @@ def tag_and_rename(flac_path, position, total):
     try:
         audio = FLAC(str(new_path))
         audio["TRACKNUMBER"] = nn
-        if "TRCK" in audio:
-            del audio["TRCK"]
         audio.save()
     except Exception:
         pass  # tag best-effort; rename already done
