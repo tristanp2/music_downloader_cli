@@ -15,7 +15,7 @@ Flow per run:
 Credentials (all gitignored, never committed):
   - deezer.arl          : Deezer session token (HiFi account/trial)  --  single source of truth
   - config/.arl         : auto-synced from deezer.arl at startup (deemix portable mode)
-  - config/spotify.conf : spotify-id / spotify-secret (Spotify dev app, Premium)
+  - config/settings.conf : spotify-id / spotify-secret (Spotify dev app, Premium) + output_dir
   - spotify_token.json  : cached Spotify user token (auto-created on first auth)
 Secrets are read from those files; nothing is hardcoded here.
 """
@@ -34,9 +34,8 @@ from pathlib import Path
 
 # ---- paths -----------------------------------------------------------------
 REPO = Path(__file__).resolve().parent
-WORK_DIR = Path(os.environ.get("MUSIC_DOWNLOADER_OUT",
-                                str(Path.home() / "Music" / "music_downloader_outputs")))
-CONF_SPOTIFY = REPO / "config" / "spotify.conf"
+DEFAULT_WORK_DIR = Path.home() / "Music" / "music_downloader_outputs"
+CONF_SETTINGS = REPO / "config" / "settings.conf"
 ARL = REPO / "deezer.arl"
 DEEMIX_ARL = REPO / "config" / ".arl"
 SPOTIFY_TOKEN_CACHE = REPO / "spotify_token.json"
@@ -110,11 +109,11 @@ def get_spotify_token():
     possible. On first run (no cache) it performs the auth-code flow: opens your
     browser to approve the app, runs a local server on 127.0.0.1:48721 to catch
     the callback, then exchanges the code for tokens and caches them."""
-    conf = read_conf(CONF_SPOTIFY)
+    conf = read_conf(CONF_SETTINGS)
     client_id = conf.get("spotify-id")
     client_secret = conf.get("spotify-secret")
     if not (client_id and client_secret):
-        die("config/spotify.conf missing spotify-id / spotify-secret (Spotify dev app).")
+        die("config/settings.conf missing spotify-id / spotify-secret (Spotify dev app).")
 
     # 1. cached + still valid?
     if SPOTIFY_TOKEN_CACHE.is_file():
@@ -269,12 +268,24 @@ def deemix_download(url, out_dir):
     r = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True, timeout=300)
     return "All done" in r.stdout or "Completed download" in r.stdout
 
+def resolve_output_dir():
+    """Output base dir precedence: env MUSIC_DOWNLOADER_OUT > config/settings.conf
+    `output_dir` > default ~/Music/music_downloader_outputs. `~` expands to home."""
+    env = os.environ.get("MUSIC_DOWNLOADER_OUT")
+    if env:
+        return Path(os.path.expanduser(env)).resolve()
+    cfg = read_conf(CONF_SETTINGS)
+    if cfg.get("output_dir"):
+        return Path(os.path.expanduser(cfg["output_dir"])).resolve()
+    return DEFAULT_WORK_DIR.resolve()
+
 def main():
     if not ARL.is_file():
         die("deezer.arl missing (Deezer HiFi session token).")
 
     arl_text = ARL.read_text(encoding="utf-8").strip()
     sync_deezer_arl()  # single source of truth -> config/.arl for deemix
+    WORK_DIR = resolve_output_dir()
     WORK_DIR.mkdir(parents=True, exist_ok=True)
 
     print("=== Spotify -> FLAC (Deezer) ===")

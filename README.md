@@ -46,8 +46,9 @@ these third-party packages from your system Python.
    `config/.arl` for deemix on each run, so this is the only Deezer file you
    edit.
 2. **Spotify app creds**  --  put your Spotify developer app's
-   `client_id` and `client_secret` into `config/spotify.conf`:
-   ```
+   `client_id` and `client_secret` into `config/settings.conf`
+   (same file as the `output_dir` setting):
+   ```ini
    spotify-id = <your client id>
    spotify-secret = <your client secret>
    ```
@@ -73,12 +74,20 @@ prompted; it downloads every track as FLAC, then waits for the next URL.
 
 ## Output
 
-- Downloads land in `~/Music/music_downloader_outputs/<playlist name>/` (the folder is
-  named after the playlist, not its ID).
-- Override the location with the `MUSIC_DOWNLOADER_OUT` environment variable:
-  ```bash
-  MUSIC_DOWNLOADER_OUT=/data/music python spotify_to_flac.py
-  ```
+- Downloads land in `<base>/<playlist name>/` (the folder is named after the
+  playlist, not its ID).
+- The output **base** directory is resolved in this order:
+  1. `MUSIC_DOWNLOADER_OUT` environment variable (highest priority):
+     ```bash
+     MUSIC_DOWNLOADER_OUT=/data/music python spotify_to_flac.py
+     ```
+  2. `output_dir` in `config/settings.conf` (edit the template there):
+     ```
+     output_dir = D:/music/flac
+     ```
+  3. Default if neither is set: `~/Music/music_downloader_outputs`
+- `config/settings.conf` supports `~` for home and absolute paths. It is
+  gitignored (machine-specific), so each machine sets its own path.
 - Tracks Deezer can't match are written to `missed_tracks.json` in the output
   directory.
 
@@ -94,5 +103,5 @@ prompted; it downloads every track as FLAC, then waits for the next URL.
 ## .gitignore
 
 Excludes `.venv/`, `music_downloader_outputs/`, and all secrets (`deezer.arl`,
-`spotify_token.json`, `config/spotify.conf`, `config/.arl`). Nothing
+`spotify_token.json`, `config/settings.conf`, `config/.arl`). Nothing
 sensitive is committed.

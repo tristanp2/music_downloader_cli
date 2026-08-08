@@ -16,7 +16,8 @@ music_downloader_outputs/
 cookies/
 deezer.arl
 spotify_token.json
-config/spotify.conf
+config/settings.conf
+config/config.json
 config/.arl
 
 # C extensions
