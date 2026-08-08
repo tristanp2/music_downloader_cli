@@ -337,7 +337,7 @@ def tag_and_rename(flac_path, position, total):
     """Rename <name>.flac -> 'NN - <name>.flac' and set the Vorbis TRACKNUMBER
     comment to the Spotify playlist position (NN). FLAC uses Vorbis comments,
     NOT the ID3 'TRCK' key -- Windows Explorer's '#' column and the Denon Prime
-    4 both read TRACKNUMBER, so we write that (and clear any stale TRCK).
+    4 both read TRACKNUMBER, so we write that.
     Idempotent: if already prefixed, just ensures the tag is correct."""
     from mutagen.flac import FLAC
     try:
@@ -349,8 +349,6 @@ def tag_and_rename(flac_path, position, total):
         try:
             audio = FLAC(str(flac_path))
             audio["TRACKNUMBER"] = nn
-            if "TRCK" in audio:
-                del audio["TRCK"]
             audio.save()
         except Exception:
             pass
