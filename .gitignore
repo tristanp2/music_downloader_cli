@@ -3,6 +3,22 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Hermes / agent venv
+.venv/
+
+# Auth/session secrets  --  never commit
+cookies/
+
+# Download output
+music_downloader_outputs/
+
+# Auth/session secrets  --  Deezer ARL + Spotify token + Spotify dev-app creds are sensitive, never commit
+cookies/
+deezer.arl
+spotify_token.json
+config/spotify.conf
+config/.arl
+
 # C extensions
 *.so
 
