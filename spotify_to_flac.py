@@ -499,6 +499,17 @@ def main():
             pos = t["position"]
             label = f"[{pos}/{len(tracks)}] {display[:60]}"
             print(f"{label}")
+            # skip-if-exists: the output folder IS the registry. A track is
+            # already downloaded if its position-prefixed FLAC is present
+            # (tag_and_rename names files "NN - Artist - Title.flac"), so we
+            # skip the whole Deezer fetch+download for it.
+            total = len(tracks)
+            nn = f"{pos:0{len(str(total))}d}"
+            existing = sorted(out_dir.glob(f"{nn} - *.flac"))
+            if existing:
+                print(f"    [skip] already present: {existing[0].name}")
+                statuses.append("downloaded")
+                continue
             hit = deezer_search(dz, q)
             if not hit:
                 print("    [deezer] no match")
