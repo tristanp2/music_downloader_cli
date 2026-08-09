@@ -615,7 +615,7 @@ def main():
                 missed.append(t)
                 statuses.append("missed")
 
-        # record the playlist source + fetched track set for the sync cron
+        # record the playlist source + fetched track set for the sync cron.
         try:
             meta_path = write_meta(out_dir, url, pid, pl_name, tracks, statuses)
             print(f"[*] wrote {meta_path.name}")
@@ -623,12 +623,7 @@ def main():
             print(f"[warn] could not write playlist.meta.json: {e}")
 
         if missed:
-            out_dir.mkdir(parents=True, exist_ok=True)  # ensure it exists even if 0 downloads
-            log = out_dir / "missed_tracks.json"
-            prev = json.loads(log.read_text()) if log.is_file() else []
-            prev.extend(missed)
-            log.write_text(json.dumps(prev, indent=2, ensure_ascii=False), encoding="utf-8")
-            print(f"\n[!] {len(missed)} tracks unmatched by Deezer (logged to missed_tracks.json):")
+            print(f"\n[!] {len(missed)} tracks unmatched by Deezer (see status in playlist.meta.json):")
             for t in missed:
                 print("   -", " ".join(t["artists"]), t["name"])
         print()
