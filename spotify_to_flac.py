@@ -349,13 +349,23 @@ def deemix_download(dz, deezer_url, settings, out_dir, label):
     """Download a Deezer URL as FLAC via the deemix library (not subprocess).
     Forces a FLAT layout (no artist/album subfolders) so the file lands directly
     in out_dir, which keeps playlist ordering sane for players like the Denon
-    Prime 4. Returns the downloaded FLAC path, or None on failure."""
+    Prime 4. Returns the downloaded FLAC path, or None on failure.
+
+    Robustness: we snapshot the .flac filenames present BEFORE the download and
+    then identify the genuinely NEW file afterwards. Relying on "newest mtime"
+    alone is fragile when out_dir already contains other .flac files -- the
+    pre-existing files can have a newer mtime than the just-finalized download,
+    causing us to return the wrong path and leave the real download unrenamed
+    (no position prefix)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     # set the output location + flat layout at runtime (override config.json)
     settings["downloadLocation"] = str(out_dir)
     for key in ("createArtistFolder", "createAlbumFolder", "createSingleFolder",
                 "createCDFolder", "createStructurePlaylist"):
         settings[key] = False
+    before = {f.name for f in out_dir.glob("*.flac")}
+    baseline_mtime = max((f.stat().st_mtime for f in out_dir.glob("*.flac")),
+                         default=0.0)
     try:
         download_object = generateDownloadObject(dz, deezer_url, TrackFormats.FLAC,
                                                   None, None)
@@ -375,23 +385,85 @@ def deemix_download(dz, deezer_url, settings, out_dir, label):
         except Exception as e:
             print(f"    [deezer] download failed: {e}")
             return None
-    # find the FLAC we just pulled (most recently modified .flac in out_dir)
-    flacs = sorted(out_dir.glob("*.flac"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return flacs[0] if flacs else None
+    # Identify the file we just created: it must be NEWER than the baseline
+    # captured before the download started. A genuinely failed download (e.g.
+    # "Track not found at desired bitrate") writes nothing, so no file will
+    # exceed the baseline -- in that case we return None and the caller logs it
+    # as missed, rather than returning a stale .flac already in the folder.
+    candidates = [f for f in out_dir.glob("*.flac")
+                  if f.stat().st_mtime > baseline_mtime + 0.01]
+    if not candidates:
+        return None
+    # Prefer a file whose name did not exist before; otherwise the newest one.
+    for f in sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True):
+        if f.name not in before:
+            return f
+    return candidates[0]
+
+def _strip_position_prefix(stem):
+    """Remove ALL leading 'NN - ' position prefixes, returning the core name.
+    '05 - 13 - Eddie C - X' -> 'Eddie C - X'; '13 - Eddie C - X' -> same;
+    'Eddie C - X' -> same. Loops because a buggy re-run can stack prefixes."""
+    import re
+    prev = None
+    cur = stem.strip()
+    while cur != prev:
+        prev = cur
+        cur = re.sub(r'^\d+\s*-\s+', '', cur).strip()
+    return cur
+
+
+def _normalize(s):
+    """Case/space/punctuation-insensitive key for fuzzy track matching."""
+    import re
+    return re.sub(r'[^a-z0-9]+', '', (s or "").lower())
+
+
+def _core_artist_title(stem):
+    """From a filename stem, return (artist, title) by splitting on ' - '
+    after stripping any leading position prefix. '13 - Eddie C - X' -> ('eddie c','x')."""
+    core = _strip_position_prefix(stem)
+    if " - " in core:
+        artist, _, title = core.partition(" - ")
+        return artist.strip(), title.strip()
+    return "", core
+
+
+def _find_existing_track(out_dir, artists, title):
+    """Return an existing FLAC in out_dir whose TITLE matches the given track,
+    or None. Match rule: normalized Spotify title must be contained in (or
+    contain) the on-disk title. This tolerates the fact that Deezer filenames
+    append mix/edition suffixes -- e.g. Spotify 'Adapt 2' vs the file
+    'Adapt 2 (Original Mix)' -- so a strict-equality check would miss it and
+    re-download every time. We match on TITLE ONLY (not artist): Spotify and
+    Deezer routinely catalog the same track under different artist strings."""
+    want_title = _normalize(title)
+    if not want_title:
+        return None
+    for f in out_dir.glob("*.flac"):
+        _, ftitle = _core_artist_title(f.stem)
+        fnt = _normalize(ftitle)
+        if fnt and (want_title in fnt or fnt in want_title):
+            return f
+    return None
+
 
 def tag_and_rename(flac_path, position, total):
     """Rename <name>.flac -> 'NN - <name>.flac' and set the Vorbis TRACKNUMBER
     comment to the Spotify playlist position (NN). FLAC uses Vorbis comments,
     NOT the ID3 'TRCK' key -- Windows Explorer's '#' column and the Denon Prime
     4 both read TRACKNUMBER, so we write that.
-    Idempotent: if already prefixed, just ensures the tag is correct."""
+    Idempotent: strips any existing leading 'NN - ' first, so re-runs never
+    produce a doubled prefix like '05 - 13 - Eddie C - X'."""
     from mutagen.flac import FLAC
     try:
         nn = f"{position:0{len(str(total))}d}"  # zero-padded, width = digits in total
     except Exception:
         nn = str(position)
-    # already prefixed? just fix the tag if needed
-    if flac_path.stem.startswith(nn + " - "):
+    core = _strip_position_prefix(flac_path.stem)
+    target_name = f"{nn} - {core}.flac"
+    # already correctly named? just ensure the tag is right
+    if flac_path.name == target_name:
         try:
             audio = FLAC(str(flac_path))
             audio["TRACKNUMBER"] = nn
@@ -399,10 +471,18 @@ def tag_and_rename(flac_path, position, total):
         except Exception:
             pass
         return flac_path
-    new_path = flac_path.with_name(f"{nn} - {flac_path.name}")
-    # avoid clobbering an existing prefixed file
+    new_path = flac_path.with_name(target_name)
+    # If a correctly-named file already exists, the track is already present
+    # and the freshly downloaded flac_path is a redundant duplicate (e.g. a
+    # re-run the skip-check missed because Spotify and Deezer label the track
+    # slightly differently). Delete the duplicate so we never leave an
+    # unprefixed orphan in the folder, and keep the existing prefixed truth.
     if new_path.exists() and new_path != flac_path:
-        return flac_path
+        try:
+            flac_path.unlink()
+        except Exception:
+            pass  # if we can't delete, just leave the existing file as-is
+        return new_path
     flac_path.rename(new_path)
     try:
         audio = FLAC(str(new_path))
@@ -500,14 +580,16 @@ def main():
             label = f"[{pos}/{len(tracks)}] {display[:60]}"
             print(f"{label}")
             # skip-if-exists: the output folder IS the registry. A track is
-            # already downloaded if its position-prefixed FLAC is present
-            # (tag_and_rename names files "NN - Artist - Title.flac"), so we
-            # skip the whole Deezer fetch+download for it.
+            # already downloaded if a FLAC with the same artist+title already
+            # exists (any position prefix). We match on track IDENTITY, not on
+            # playlist position -- a re-run can place the same track at a
+            # different position, and the Deezer file may already carry a
+            # different/stale prefix, so position alone is NOT a reliable key.
             total = len(tracks)
             nn = f"{pos:0{len(str(total))}d}"
-            existing = sorted(out_dir.glob(f"{nn} - *.flac"))
+            existing = _find_existing_track(out_dir, t["artists"], t["name"])
             if existing:
-                print(f"    [skip] already present: {existing[0].name}")
+                print(f"    [skip] already present: {existing.name}")
                 statuses.append("downloaded")
                 continue
             hit = deezer_search(dz, q)
