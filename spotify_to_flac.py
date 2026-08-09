@@ -206,7 +206,18 @@ def parse_spotify_playlist(token, playlist_id):
         t = item.get("track")
         if not isinstance(t, dict):
             t = item.get("item")
-        return t if isinstance(t, dict) else None
+        if not isinstance(t, dict):
+            return None
+        # Capture the stable Spotify track URI so a future sync can diff on it
+        # (key on this, never on position/title which can change).
+        # Prefer the canonical spotify:track:<id> form built from the track id,
+        # since t["uri"] is sometimes null (local tracks / odd response shapes).
+        tid = t.get("id")
+        if tid:
+            t["spotify_uri"] = f"spotify:track:{tid}"
+        else:
+            t["spotify_uri"] = t.get("uri")  # may be None for local/episode rows
+        return t
 
     pl = _spotify_api_get(token, f"https://api.spotify.com/v1/playlists/{playlist_id}")
     name = pl.get("name", playlist_id)
@@ -224,7 +235,13 @@ def parse_spotify_playlist(token, playlist_id):
             arts = [(a.get("name") or "").strip() for a in t.get("artists", [])]
             if tn:
                 position += 1
-                tracks.append({"name": tn, "artists": arts, "position": position})
+                tracks.append({
+                    "name": tn,
+                    "artists": arts,
+                    "position": position,
+                    # stable key for the sync cron (built in track_of from id/uri)
+                    "spotify_uri": t.get("spotify_uri"),
+                })
         url = page.get("next")
         if not url:
             break
@@ -255,6 +272,35 @@ def safe_folder_name(name):
     cleaned = "".join("_" if c in bad else c for c in name).strip()
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned[:80] or None
+
+def write_meta(out_dir, spotify_url, spotify_id, name, tracks, statuses):
+    """Write playlist.meta.json into the playlist folder so a future sync cron
+    can re-query Spotify and download only tracks not already fetched.
+
+    Records the source URL/ID, playlist name, fetch time, and per-track:
+    position, spotify_uri (stable key), artist, title, status
+    (downloaded or missed). status comes from the parallel statuses list
+    (same order as tracks).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "spotify_url": spotify_url,
+        "spotify_id": spotify_id,
+        "name": name,
+        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "tracks": [],
+    }
+    for t, st in zip(tracks, statuses):
+        meta["tracks"].append({
+            "position": t.get("position"),
+            "spotify_uri": t.get("spotify_uri"),
+            "artist": " ".join(t.get("artists", [])),
+            "title": t.get("name"),
+            "status": st,
+        })
+    path = out_dir / "playlist.meta.json"
+    path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
 
 class ProgressListener:
     """Bridge deemix's listener interface to a rich progress bar.
@@ -440,6 +486,7 @@ def main():
         out_dir = WORK_DIR / folder
         print(f"[*] output folder: {out_dir}\n")
         missed = []
+        statuses = []  # parallel to `tracks`: 'downloaded' | 'missed'
         for i, t in enumerate(tracks, 1):
             q = f"{' '.join(t['artists'])} {t['name']}"
             # display label: "Artist - Title" with a dash separator (search keeps q)
@@ -456,10 +503,12 @@ def main():
             if not hit:
                 print("    [deezer] no match")
                 missed.append(t)
+                statuses.append("missed")
                 continue
             dz_url = hit.get("link")
             if not dz_url:
                 missed.append(t)
+                statuses.append("missed")
                 continue
             # download (flat), then rename + tag with the original position so the
             # Denon Prime 4 keeps the true playlist order even when tracks are missed
@@ -467,9 +516,18 @@ def main():
             if flac:
                 final = tag_and_rename(flac, pos, len(tracks))
                 print(f"    [deezer] FLAC downloaded -> {final.name}")
+                statuses.append("downloaded")
             else:
                 print("    [deezer] download failed")
                 missed.append(t)
+                statuses.append("missed")
+
+        # record the playlist source + fetched track set for the sync cron
+        try:
+            meta_path = write_meta(out_dir, url, pid, pl_name, tracks, statuses)
+            print(f"[*] wrote {meta_path.name}")
+        except Exception as e:
+            print(f"[warn] could not write playlist.meta.json: {e}")
 
         if missed:
             out_dir.mkdir(parents=True, exist_ok=True)  # ensure it exists even if 0 downloads
