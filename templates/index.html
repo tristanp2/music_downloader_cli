@@ -19,6 +19,8 @@
   input[type=text] { width: 100%; box-sizing: border-box; padding: 9px; background: #11131a; border: 1px solid #333a47; color: #e6e6e6; border-radius: 6px; font-size: 13px; }
   button { margin-top: 10px; padding: 8px 16px; background: #2d6cdf; border: 0; color: white; border-radius: 6px; font-size: 13px; cursor: pointer; }
   button:hover { background: #3a78ec; }
+  .zip-btn { margin-top: 8px; padding: 5px 12px; background: #1f5132; border: 0; color: white; border-radius: 5px; font-size: 12px; cursor: pointer; }
+  .zip-btn:hover { background: #2a6b44; }
   .stats { font-size: 12px; color: #9aa3b2; margin-top: 4px; }
   .error-summary { font-size: 12px; color: #f87171; margin-top: 4px; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -79,8 +81,8 @@
   <section class="card" style="grid-column: 1 / -1;">
     <h2>Library (playlist.meta.json)</h2>
     <table id="playlists">
-      <thead><tr><th>Folder</th><th>Name</th><th>Total</th><th>Downloaded</th><th>Missed</th><th>Fetched</th></tr></thead>
-      <tbody><tr><td colspan="6" class="empty">loading...</td></tr></tbody>
+      <thead><tr><th>Folder</th><th>Name</th><th>Total</th><th>Downloaded</th><th>Missed</th><th>Fetched</th><th>ZIP</th></tr></thead>
+      <tbody><tr><td colspan="7" class="empty">loading...</td></tr></tbody>
     </table>
   </section>
 </main>
@@ -204,6 +206,19 @@ function updateJobCard(j) {
     const r = j.result;
     summaryEl.className = "stats";
     summaryEl.textContent = "downloaded " + r.downloaded + " / skipped " + r.skipped + " / missed " + r.missed + " / failed " + r.failed;
+    // add zip download button for completed jobs
+    if (j.result.folder) {
+      let zipBtn = summaryEl.querySelector(".zip-btn");
+      if (!zipBtn) {
+        zipBtn = document.createElement("button");
+        zipBtn.className = "zip-btn";
+        zipBtn.textContent = "Download ZIP";
+        zipBtn.addEventListener("click", () => {
+          window.location.href = "/zip/" + encodeURIComponent(j.result.folder);
+        });
+        summaryEl.appendChild(zipBtn);
+      }
+    }
   } else if (j.result && j.result.error) {
     summaryEl.className = "error-summary";
     summaryEl.textContent = j.result.error;
@@ -271,10 +286,11 @@ async function refreshPlaylists() {
     const data = await r.json();
     const rows = data.playlists || [];
     const tb = $("#playlists tbody");
-    if (!rows.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">No playlists yet.</td></tr>'; return; }
+    if (!rows.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">No playlists yet.</td></tr>'; return; }
     tb.innerHTML = rows.map(p => '<tr>' +
       '<td>' + esc(p.folder) + '</td><td>' + esc(p.name) + '</td><td>' + p.total + '</td>' +
       '<td>' + p.downloaded + '</td><td>' + p.missed + '</td><td>' + (p.fetched_at || '') + '</td>' +
+      '<td><a class="zip-link" href="/zip/' + encodeURIComponent(p.folder) + '">ZIP</a></td>' +
     '</tr>').join("");
   } catch {}
 }

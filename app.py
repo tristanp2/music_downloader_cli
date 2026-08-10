@@ -31,14 +31,8 @@ import uuid
 import atexit
 from pathlib import Path
 
-import re
-
-REPO = Path(__file__).resolve().parent
-if str(REPO) not in sys.path:
-    sys.path.insert(0, str(REPO))
-
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.config import resolve_output_dir, sync_deezer_arl, ARL, read_conf
@@ -46,6 +40,10 @@ from core.deezer import init_deezer
 from core.downloader import run_playlist
 from core.registry import list_playlists
 from core import server_lock
+
+REPO = Path(__file__).resolve().parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
 
 app = FastAPI(title="music-downloader")
 
@@ -250,6 +248,38 @@ def health():
             "arl_present": ARL.is_file(),
             "jobs_running": sum(1 for j in JOBS.values() if j["status"] == "running"),
         },
+    )
+
+
+import zipfile, io
+
+@app.get("/zip/{folder}")
+def download_zip(folder: str):
+    # resolve safely under WORK_DIR only
+    fp = (WORK_DIR / folder).resolve()
+    if not str(fp).startswith(str(WORK_DIR.resolve())):
+        raise HTTPException(status_code=403, detail="invalid path")
+    if not fp.is_dir():
+        raise HTTPException(status_code=404, detail="playlist folder not found")
+    safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in folder)
+    filename = safe_name + ".zip"
+
+    def gen():
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for fpath in sorted(fp.glob("*.flac")):
+                zf.write(fpath, fpath.name)
+        buf.seek(0)
+        while True:
+            chunk = buf.read(64 * 1024)
+            if not chunk:
+                break
+            yield chunk
+
+    return StreamingResponse(
+        gen(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
