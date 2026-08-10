@@ -5,6 +5,7 @@ CLI path: get_spotify_token() does the full interactive auth-code flow.
 Web path: get_spotify_token_silent() uses only cache + refresh (no browser).
 """
 import json
+import re
 import time
 import urllib.parse
 import urllib.request
