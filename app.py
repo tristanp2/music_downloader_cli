@@ -31,6 +31,8 @@ import uuid
 import atexit
 from pathlib import Path
 
+import re
+
 REPO = Path(__file__).resolve().parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
@@ -98,13 +100,30 @@ def _run_job(job_id, url):
     """Background thread: run the playlist and stream progress into the job."""
     global DZ
     job = JOBS[job_id]
+    job["progress"] = {"total": None, "tracks": {}}
     lines = job["log"]
+    tracks = job["progress"]["tracks"]
     with DZ_LOCK:
         def on_progress(msg):
             lines.append(msg)
+        def on_event(e):
+            t = e.get("type")
+            if t == "start":
+                job["progress"]["total"] = e["total"]
+                tracks[e["pos"]] = {"pos": e["pos"], "name": e["name"], "status": "downloading", "pct": None}
+            elif t == "pct":
+                # update the latest downloading track
+                for p in sorted(tracks.keys(), reverse=True):
+                    if tracks[p]["status"] == "downloading":
+                        tracks[p]["pct"] = e["pct"]
+                        break
+            elif t == "done":
+                pos = e["pos"]
+                if pos in tracks:
+                    tracks[pos].update(status=e["status"], pct=e["pct"])
         try:
             result = run_playlist(url, DZ, SETTINGS, work_dir=WORK_DIR,
-                                  on_progress=on_progress)
+                                  on_progress=on_progress, on_event=on_event)
         except Exception as e:
             result = {"ok": False, "error": f"run_playlist raised: {e}"}
     job["result"] = result
@@ -187,12 +206,12 @@ def download(request: Request, payload: dict):
 @app.get("/jobs")
 def jobs():
     with JOBS_LOCK:
-        # newest first
         items = sorted(JOBS.values(), key=lambda j: j["started_at"], reverse=True)
     return {"jobs": [{
         "id": j["id"], "url": j["url"], "status": j["status"],
         "started_at": j["started_at"], "finished_at": j["finished_at"],
         "log": j["log"][-200:], "result": j["result"],
+        "progress": j.get("progress"),
     } for j in items]}
 
 
@@ -206,6 +225,7 @@ def job_status(job_id: str):
         "id": j["id"], "url": j["url"], "status": j["status"],
         "started_at": j["started_at"], "finished_at": j["finished_at"],
         "log": j["log"][-200:], "result": j["result"],
+        "progress": j.get("progress"),
     }
 
 

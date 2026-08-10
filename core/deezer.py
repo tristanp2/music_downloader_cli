@@ -119,6 +119,9 @@ class ProgressListener:
         if key == "updateQueue" and isinstance(value, dict):
             pct = value.get("progress")
             if isinstance(pct, (int, float)):
+                # structured event callback (server mode)
+                if getattr(self, '_on_pct', None):
+                    self._on_pct(int(pct))
                 if self.on_progress is not None:
                     bucket = int(pct // 10)
                     if bucket != self._last_bucket:
@@ -152,7 +155,7 @@ class ProgressListener:
                 self.progress.console.print(f"    {line}")
 
 
-def deemix_download(dz, deezer_url, settings, out_dir, label, on_progress=None):
+def deemix_download(dz, deezer_url, settings, out_dir, label, on_progress=None, on_pct=None):
     """Download a Deezer URL as FLAC via the deemix library (not subprocess).
 
     Forces a FLAT layout (no artist/album subfolders) so the file lands directly
@@ -162,6 +165,7 @@ def deemix_download(dz, deezer_url, settings, out_dir, label, on_progress=None):
     on_progress: when set (server/cron), the live rich progress bar is
     suppressed and ProgressListener logs plain ~10%-increment text lines
     through on_progress instead, so server logs stay clean (no ANSI garbage).
+    on_pct: when set, fires on_pct(pct_int) for every deemix updateQueue event.
 
     Robustness: we snapshot the .flac filenames present BEFORE the download and
     then identify the genuinely NEW file afterwards. Relying on "newest mtime"
@@ -202,7 +206,8 @@ def deemix_download(dz, deezer_url, settings, out_dir, label, on_progress=None):
                 print(f"    [deezer] download failed: {e}")
                 return None
     else:
-        # server/cron mode: no TUI, plain logged increments only
+        # server/cron mode: no TUI, wire on_pct for structured events
+        listener._on_pct = on_pct
         try:
             Downloader(dz, download_object, settings, listener=listener).start()
         except Exception as e:
