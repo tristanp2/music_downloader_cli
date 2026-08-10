@@ -4,9 +4,7 @@ Read a Spotify playlist and download each track as lossless **FLAC** via
 [Deezer](https://deezer.com) (HiFi/FLAC tier required for true lossless).
 
 Spotify is used **only** to read the playlist. Deezer does the actual FLAC
-download (via `deemix`). No second source  --  tracks Deezer can't match are
-logged to `missed_tracks.json` for you to handle manually.
-
+download (via `deemix`).
 ## Requirements
 
 - Python 3.11+
