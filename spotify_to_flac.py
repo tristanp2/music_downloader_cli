@@ -334,15 +334,73 @@ class ProgressListener:
             self.progress.console.print(f"    {line}")
 
 
-def deezer_search(dz, query):
-    """Return the best Deezer track dict for a query, or None. Uses a shared
-    Deezer session (dz) rather than logging in per call."""
+def _dz_field(track, *keys, default=""):
+    """Read a nested key from a Deezer result dict, tolerating missing fields."""
+    cur = track
+    for k in keys:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(k)
+    return cur if isinstance(cur, str) else default
+
+
+def _tokenize(s):
+    """Lowercase, strip punctuation, split on whitespace -> set of tokens."""
+    import re
+    return set(re.sub(r'[^a-z0-9]+', ' ', (s or '').lower()).split())
+
+
+def _title_similarity(a, b):
+    """Jaccard similarity between two title strings (word tokens)."""
+    ta, tb = _tokenize(a), _tokenize(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def deezer_search(dz, query, target_title=None, target_artists=None):
+    """Return the best Deezer track dict for a query, or None.
+
+    Deezer's search ranks by popularity, so the top hit is often NOT the track
+    we asked for when several similarly-named releases exist (e.g. 'Hedonic
+    Setpoint 85' vs '... 87' vs '... 70'). We no longer blindly take data[0];
+    instead we score every result on title+artist similarity to the target and
+    return the closest match. If even the best result is a poor match we return
+    None so the caller logs it as missed rather than downloading the wrong song.
+    """
     try:
         res = dz.api.search(query)
     except Exception:
         return None
     data = res.get("data") or []
-    return data[0] if data else None
+    if not data:
+        return None
+
+    want_title = target_title or ""
+    want_artist = " ".join(target_artists or [])
+
+    def score(track):
+        t_title = _dz_field(track, "title")
+        t_artist = _dz_field(track, "artist", "name")
+        # Use Jaccard as a gradient (not just pass/fail) so 'Hedonic Setpoint
+        # 85' (1.0) beats '... 70' / '... 87' (0.50 each) when Deezer ranks
+        # the wrong one first. Artist match is a bonus, not required.
+        title_sim = _title_similarity(want_title, t_title)
+        if title_sim < 0.5:
+            return 0
+        artist_sim = _title_similarity(want_artist, t_artist) if want_artist and t_artist else 0
+        # title contributes 0-1, artist contributes up to 0.5
+        return title_sim + (0.5 if artist_sim >= 0.5 else 0)
+
+    best = None
+    best_score = 0
+    for track in data:
+        s = score(track)
+        if s > best_score:
+            best_score = s
+            best = track
+    # require at least a partial title match
+    return best if best_score >= 0.5 else None
 
 
 def deemix_download(dz, deezer_url, settings, out_dir, label):
@@ -592,7 +650,7 @@ def main():
                 print(f"    [skip] already present: {existing.name}")
                 statuses.append("downloaded")
                 continue
-            hit = deezer_search(dz, q)
+            hit = deezer_search(dz, q, target_title=t["name"], target_artists=t["artists"])
             if not hit:
                 print("    [deezer] no match")
                 missed.append(t)
