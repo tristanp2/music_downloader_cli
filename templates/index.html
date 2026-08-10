@@ -58,6 +58,23 @@
   .track-status.missed { color: #fbbf24; }
   .track-status.failed { color: #f87171; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  /* library expansion */
+  .lib-row { cursor: pointer; }
+  .lib-row:hover { background: rgba(45,108,223,0.08); }
+  .lib-detail { display: none; }
+  .lib-detail.open { display: table-row; }
+  .lib-detail td { padding: 0; background: #11131a; }
+  .lib-detail-inner { padding: 8px 12px; max-height: 300px; overflow-y: auto; }
+  .lib-track { display: flex; align-items: center; gap: 6px; padding: 3px 0; border-bottom: 1px solid #1a1e27; font-size: 12px; }
+  .lib-track:last-child { border-bottom: none; }
+  .lib-track .lt-pos { color: #6b7280; min-width: 28px; text-align: right; font-size: 11px; }
+  .lib-track .lt-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lib-track .lt-status { min-width: 18px; text-align: center; font-size: 13px; }
+  .lt-status.downloaded { color: #4ade80; }
+  .lt-status.missed { color: #fbbf24; }
+  .lt-chevron { min-width: 16px; text-align: center; color: #6b7280; font-size: 12px; transition: transform 0.2s; }
+  .lt-chevron.open { transform: rotate(90deg); }
 </style>
 </head>
 <body>
@@ -81,8 +98,8 @@
   <section class="card" style="grid-column: 1 / -1;">
     <h2>Library (playlist.meta.json)</h2>
     <table id="playlists">
-      <thead><tr><th>Folder</th><th>Name</th><th>Total</th><th>Downloaded</th><th>Missed</th><th>Fetched</th><th>ZIP</th></tr></thead>
-      <tbody><tr><td colspan="7" class="empty">loading...</td></tr></tbody>
+      <thead><tr><th></th><th>Folder</th><th>Name</th><th>Total</th><th>Downloaded</th><th>Missed</th><th>Fetched</th><th>ZIP</th></tr></thead>
+      <tbody><tr><td colspan="8" class="empty">loading...</td></tr></tbody>
     </table>
   </section>
 </main>
@@ -94,6 +111,8 @@ const icons = { pending: "\u00b7", downloading: "\u25cb", downloaded: "\u2713", 
 
 /* ---- keyed DOM rendering ---- */
 const knownJobs = {};  // job_id -> { el, metaEl, listEl, summaryEl }
+const knownLib = {};  // folder -> { row, detail, chevron, inner }
+const libCache = {};  // folder -> tracks[]
 
 function esc(s) {
   if (!s) return "";
@@ -286,14 +305,142 @@ async function refreshPlaylists() {
     const data = await r.json();
     const rows = data.playlists || [];
     const tb = $("#playlists tbody");
-    if (!rows.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">No playlists yet.</td></tr>'; return; }
-    tb.innerHTML = rows.map(p => '<tr>' +
-      '<td>' + esc(p.folder) + '</td><td>' + esc(p.name) + '</td><td>' + p.total + '</td>' +
-      '<td>' + p.downloaded + '</td><td>' + p.missed + '</td><td>' + (p.fetched_at || '') + '</td>' +
-      '<td><a class="zip-link" href="/zip/' + encodeURIComponent(p.folder) + '">ZIP</a></td>' +
-    '</tr>').join("");
+    if (!rows.length) {
+      // clear all keyed rows and show empty
+      for (const folder in knownLib) {
+        knownLib[folder].row.remove();
+        knownLib[folder].detail.remove();
+        delete knownLib[folder];
+      }
+      tb.innerHTML = '<tr><td colspan="8" class="empty">No playlists yet.</td></tr>';
+      return;
+    }
+    // remove stale .empty row if present
+    const emptyEl = tb.querySelector(".empty");
+    if (emptyEl) emptyEl.remove();
+
+    const folders = new Set();
+    for (let i = 0; i < rows.length; i++) {
+      const p = rows[i];
+      const fid = "lib-" + p.folder;
+      folders.add(fid);
+      let ctx = knownLib[fid];
+
+      if (!ctx) {
+        // create row
+        const row = document.createElement("tr");
+        row.className = "lib-row";
+        row.dataset.folder = p.folder;
+        row.dataset.fid = fid;
+        row.onclick = function() { toggleLib(this); };
+
+        const chevTd = document.createElement("td");
+        chevTd.className = "lt-chevron";
+        chevTd.innerHTML = "&#9654;";
+        row.appendChild(chevTd);
+
+        const folderTd = document.createElement("td");
+        row.appendChild(folderTd);
+        const nameTd = document.createElement("td");
+        row.appendChild(nameTd);
+        const totalTd = document.createElement("td");
+        row.appendChild(totalTd);
+        const dlTd = document.createElement("td");
+        row.appendChild(dlTd);
+        const missTd = document.createElement("td");
+        row.appendChild(missTd);
+        const fetchTd = document.createElement("td");
+        row.appendChild(fetchTd);
+        const zipTd = document.createElement("td");
+        const zipLink = document.createElement("a");
+        zipLink.className = "zip-link";
+        zipLink.href = "/zip/" + encodeURIComponent(p.folder);
+        zipLink.textContent = "ZIP";
+        zipTd.appendChild(zipLink);
+        row.appendChild(zipTd);
+
+        // create detail row
+        const detail = document.createElement("tr");
+        detail.className = "lib-detail";
+        detail.dataset.fid = fid;
+        const detailTd = document.createElement("td");
+        detailTd.colSpan = 8;
+        const inner = document.createElement("div");
+        inner.className = "lib-detail-inner";
+        inner.id = "inner-" + fid;
+        detailTd.appendChild(inner);
+        detail.appendChild(detailTd);
+
+        // insert after existing rows
+        tb.appendChild(row);
+        tb.appendChild(detail);
+
+        ctx = { row, detail, chevron: chevTd, inner };
+        knownLib[fid] = ctx;
+      }
+
+      // update cells
+      const cells = ctx.row.children;
+      cells[1].textContent = p.folder;
+      cells[2].textContent = p.name;
+      cells[3].textContent = p.total;
+      cells[4].textContent = p.downloaded;
+      cells[5].textContent = p.missed;
+      cells[6].textContent = p.fetched_at || "";
+    }
+
+    // remove stale rows
+    for (const fid in knownLib) {
+      if (!folders.has(fid)) {
+        knownLib[fid].row.remove();
+        knownLib[fid].detail.remove();
+        delete knownLib[fid];
+      }
+    }
   } catch {}
 }
+
+window.toggleLib = async function(row) {
+  const fid = row.dataset.fid;
+  const folder = row.dataset.folder;
+  const ctx = knownLib[fid];
+  if (!ctx) return;
+
+  const isOpen = ctx.detail.classList.contains("open");
+
+  if (isOpen) {
+    ctx.detail.classList.remove("open");
+    ctx.chevron.classList.remove("open");
+    return;
+  }
+
+  // load tracks if not cached
+  if (!libCache[folder]) {
+    ctx.inner.innerHTML = '<div class="empty">loading...</div>';
+    try {
+      const r2 = await fetch("/library/" + encodeURIComponent(folder));
+      const pd = await r2.json();
+      libCache[folder] = pd.tracks || [];
+    } catch {
+      ctx.inner.innerHTML = '<div class="empty">failed to load</div>';
+      return;
+    }
+  }
+
+  const tracks = libCache[folder];
+  const libIcons = { downloaded: "\u2713", missed: "\u2717", skipped: "\u25b6", failed: "!" };
+  ctx.inner.innerHTML = tracks.map(function(t) {
+    var name = t.artist ? t.artist + " - " + t.title : t.title;
+    return '<div class="lib-track">' +
+      '<span class="lt-pos">' + t.position + '</span>' +
+      '<span class="lt-name">' + esc(name) + '</span>' +
+      '<span class="lt-status ' + t.status + '">' + (libIcons[t.status] || "") + '</span>' +
+    '</div>';
+  }).join("");
+
+  ctx.detail.classList.add("open");
+  ctx.chevron.classList.add("open");
+};
 
 $("#go").addEventListener("click", async () => {
   const url = $("#url").value.trim();
@@ -315,7 +462,7 @@ async function tick() {
   await refreshPlaylists();
 }
 tick();
-setInterval(tick, 2500);
+setInterval(tick, 5000);
 </script>
 </body>
 </html>

@@ -29,6 +29,7 @@ import time
 import threading
 import uuid
 import atexit
+import json
 from pathlib import Path
 
 from fastapi import FastAPI, Request, HTTPException
@@ -252,6 +253,32 @@ def health():
 
 
 import zipfile, io
+
+@app.get("/library/{folder}")
+def library_folder(folder: str):
+    # resolve safely under WORK_DIR
+    fp = (WORK_DIR / folder).resolve()
+    if not str(fp).startswith(str(WORK_DIR.resolve())):
+        raise HTTPException(status_code=403, detail="invalid path")
+    meta = fp / "playlist.meta.json"
+    if not meta.is_file():
+        raise HTTPException(status_code=404, detail="playlist.meta.json not found")
+    data = json.loads(meta.read_text(encoding="utf-8"))
+    tracks = data.get("tracks", []) or []
+    # attach filename if it exists on disk
+    for t in tracks:
+        nn = f"{t['position']:02d}"
+        t["has_file"] = any(
+            f.name.startswith(nn) and f.name.endswith(".flac")
+            for f in fp.glob("*.flac")
+        ) if t.get("status") == "downloaded" else False
+    return {
+        "folder": folder,
+        "name": data.get("name", folder),
+        "spotify_url": data.get("spotify_url"),
+        "tracks": tracks,
+    }
+
 
 @app.get("/zip/{folder}")
 def download_zip(folder: str):
