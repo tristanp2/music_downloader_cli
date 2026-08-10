@@ -44,19 +44,39 @@ def _pid_alive(pid):
 
 
 def write_lock(port):
-    """Create / refresh the lockfile with our PID + port. Overwrites any
-    stale lock left by a previous run."""
+    """Create / refresh the lockfile with our PID + port.
+
+    If an existing lock points at a DEAD PID (server crashed / hard-killed),
+    reap it first so we never refuse to start behind a stale lock. A lock with
+    a LIVE foreign PID means a real second server is up -- leave it (the caller
+    checks another_server_running() and bails).
+    """
+    try:
+        if LOCK_PATH.is_file():
+            try:
+                data = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
+                stale_pid = data.get("pid")
+                if stale_pid is not None and not _pid_alive(stale_pid):
+                    LOCK_PATH.unlink()
+            except Exception:
+                # unreadable lock -> treat as stale and replace
+                LOCK_PATH.unlink()
+    except Exception:
+        pass
     payload = {"pid": os.getpid(), "port": port}
     LOCK_PATH.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def clear_lock():
-    """Remove the lockfile if we own it (matches our PID)."""
+    """Remove the lockfile. PID-agnostic: on Windows SIGTERM is a hard kill that
+    never runs shutdown/atexit, so gating on our own PID would leave the lock
+    orphaned. Whoever is shutting down owns the lock at that moment, so just
+    delete it if present. The PID-liveness check in read_lock() is what makes a
+    stale lock from a crash harmless (it's ignored and reaped on next start).
+    """
     try:
         if LOCK_PATH.is_file():
-            data = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
-            if data.get("pid") == os.getpid():
-                LOCK_PATH.unlink()
+            LOCK_PATH.unlink()
     except Exception:
         pass
 
@@ -111,19 +131,25 @@ def cli_dispatch(url, dz=None, settings=None, work_dir=None):
     """Route a download request: POST to the running server if up, else run
     locally via the core lib.
 
-    When running locally, `dz`/`settings`/`work_dir` must be supplied (the CLI
-    builds its own session). Returns the result dict from run_playlist either
-    way. Raises nothing for the local path's auth/parse errors -- those are
-    already handled inside run_playlist, which returns an error dict.
+    Returns the result dict from run_playlist (local) or the server's JSON
+    (which carries a `job_id`). Both are tagged with `routed` = "server" or
+    "local" and, for server mode, `port`, so the CLI can tell the user which
+    path it took. Raises nothing for the local path's auth/parse errors --
+    those are already handled inside run_playlist, which returns an error dict.
     """
     port = server_is_up()
     if port is not None:
-        return _post_to_server(port, url)
+        r = _post_to_server(port, url)
+        r["routed"] = "server"
+        r["port"] = port
+        return r
     # local fallback
     if dz is None or settings is None:
         raise RuntimeError("cli_dispatch local mode requires dz + settings")
     from .downloader import run_playlist
-    return run_playlist(url, dz, settings, work_dir=work_dir)
+    r = run_playlist(url, dz, settings, work_dir=work_dir)
+    r["routed"] = "local"
+    return r
 
 
 def _post_to_server(port, url):

@@ -37,6 +37,12 @@ def main():
     settings = __import__("deemix.settings", fromlist=["load"]).load(REPO / "config")
 
     print("=== Spotify -> FLAC (Deezer) ===")
+    srv_port = server_lock.server_is_up()
+    if srv_port is not None:
+        print(f"[mode] routing through web server on port {srv_port} "
+              f"(job queued; watch progress in the web UI)")
+    else:
+        print("[mode] local (no server running -- using core lib directly)")
     print("Paste a Spotify playlist/album URL. 'quit'/'exit'/Enter/Ctrl-C to stop.\n")
 
     while True:
@@ -54,10 +60,18 @@ def main():
 
         result = server_lock.cli_dispatch(url, dz=dz, settings=settings, work_dir=WORK_DIR)
         if not result.get("ok"):
+            # server mode returns an error dict (e.g. job POST failed) without a
+            # [skip] tag; local mode returns run_playlist's error dict too.
             print(f"[skip] {result.get('error', 'unknown error')}")
             continue
-        print(f"  downloaded={result['downloaded']}  skipped={result['skipped']}  "
-              f"missed={result['missed']}  failed={result['failed']}")
+        if result.get("routed") == "server":
+            # server accepted the job; real progress lives in the web UI
+            # (GET /jobs/{job_id}). The CLI just confirms dispatch.
+            print(f"  [server:{result.get('port')}] job {result.get('job_id')} queued "
+                  f"-- watch progress in the web UI")
+        else:
+            print(f"  downloaded={result['downloaded']}  skipped={result['skipped']}  "
+                  f"missed={result['missed']}  failed={result['failed']}")
 
 
 if __name__ == "__main__":

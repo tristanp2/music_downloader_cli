@@ -5,3 +5,6 @@
 deezer-py
 deemix==3.6.6
 rich
+# webserver (app.py)
+fastapi
+uvicorn

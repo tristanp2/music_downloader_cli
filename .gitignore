@@ -12,13 +12,17 @@ cookies/
 # Download output
 music_downloader_outputs/
 
-# Auth/session secrets  --  Deezer ARL + Spotify token + Spotify dev-app creds are sensitive, never commit
+# Auth/session secrets  --  never commit
 cookies/
 deezer.arl
 spotify_token.json
 config/settings.conf
 config/config.json
 config/.arl
+
+# Server lockfile + log (runtime artifacts, single-process signal)
+.server.lock
+.server.log
 
 # C extensions
 *.so
