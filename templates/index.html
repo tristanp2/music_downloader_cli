@@ -39,15 +39,17 @@
   .badge.error { background: #6b2222; }
 
   /* track list */
-  .track-list { max-height: 320px; overflow-y: auto; margin-top: 8px; }
+  .track-list { max-height: 400px; overflow-y: auto; margin-top: 8px; }
   .track-row { display: flex; align-items: center; gap: 6px; padding: 4px 2px; border-bottom: 1px solid #1e2230; }
   .track-row:last-child { border-bottom: none; }
   .track-row .pos { color: #6b7280; font-size: 11px; font-variant-numeric: tabular-nums; min-width: 32px; text-align: center; }
   .track-name { font-size: 12px; flex-shrink: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .track-name.pending { color: #4b5563; }
   .mini-bar { flex: 1; height: 4px; background: #1a1e27; border-radius: 2px; overflow: hidden; }
   .mini-bar .fill { height: 100%; background: #2d6cdf; border-radius: 2px; transition: width 0.3s ease; }
   .mini-bar .fill.done { background: #2ea043; width: 100%; }
   .track-status { min-width: 18px; text-align: center; font-size: 14px; line-height: 1; }
+  .track-status.pending { color: #4b5563; }
   .track-status.downloading { color: #60a5fa; animation: pulse 1s infinite; }
   .track-status.downloaded { color: #4ade80; }
   .track-status.skipped { color: #60a5fa; }
@@ -86,7 +88,7 @@
 <script>
 const $ = (s) => document.querySelector(s);
 const token = new URLSearchParams(location.search).get("token") || null;
-const icons = { downloading: "\u25cb", downloaded: "\u2713", skipped: "\u25b6", missed: "\u2717", failed: "!" };
+const icons = { pending: "\u00b7", downloading: "\u25cb", downloaded: "\u2713", skipped: "\u25b6", missed: "\u2717", failed: "!" };
 
 /* ---- keyed DOM rendering ---- */
 const knownJobs = {};  // job_id -> { el, metaEl, listEl, summaryEl }
@@ -137,9 +139,9 @@ function renderTrackRow(listEl, track, total) {
     posEl.className = "pos";
     row.appendChild(posEl);
 
-    const nameEl = document.createElement("span");
-    nameEl.className = "track-name";
-    row.appendChild(nameEl);
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "track-name";
+    row.appendChild(nameSpan);
 
     const barWrap = document.createElement("div");
     barWrap.className = "mini-bar";
@@ -156,24 +158,26 @@ function renderTrackRow(listEl, track, total) {
   }
 
   row.querySelector(".pos").textContent = track.pos + "/" + total;
-  const nameEl = row.querySelector(".track-name");
-  nameEl.textContent = track.name;
-  nameEl.title = track.name;
 
-  const barWrap = row.querySelector(".mini-bar");
-  const barFill = row.querySelector(".mini-bar .fill");
+  const nameSpan2 = row.querySelector(".track-name");
+  nameSpan2.textContent = track.name;
+  nameSpan2.title = track.name;
+  nameSpan2.className = "track-name" + (track.status === "pending" ? " pending" : "");
+
+  const barWrap2 = row.querySelector(".mini-bar");
+  const barFill2 = row.querySelector(".mini-bar .fill");
   const showBar = (track.status === "downloading" || track.status === "downloaded" || track.status === "skipped");
-  barWrap.style.display = showBar ? "" : "none";
+  barWrap2.style.display = showBar ? "" : "none";
   if (track.status === "downloading") {
-    barFill.style.width = (track.pct != null ? track.pct : 0) + "%";
-    barFill.className = "fill";
+    barFill2.style.width = (track.pct != null ? track.pct : 0) + "%";
+    barFill2.className = "fill";
   } else {
-    barFill.className = "fill done";
+    barFill2.className = "fill done";
   }
 
-  const statusEl = row.querySelector(".track-status");
-  statusEl.className = "track-status " + track.status;
-  statusEl.textContent = icons[track.status] || "";
+  const statusEl2 = row.querySelector(".track-status");
+  statusEl2.className = "track-status " + track.status;
+  statusEl2.textContent = icons[track.status] || "";
 }
 
 function updateJobCard(j) {
@@ -189,7 +193,7 @@ function updateJobCard(j) {
   const total = p.total || 0;
   const tracksMap = p.tracks || {};
   const trackArr = Object.values(tracksMap).sort(function(a, b) { return a.pos - b.pos; });
-
+  // pre-create any missing rows so the full list is always visible
   for (let i = 0; i < trackArr.length; i++) {
     renderTrackRow(listEl, trackArr[i], total);
   }

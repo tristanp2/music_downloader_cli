@@ -46,7 +46,8 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
         where output goes.
     on_event : callable(dict) | None
         Optional structured event hook. Events are typed dicts:
-        - {"type": "start", "pos": N, "total": T, "name": "Artist - Title"}
+        - {"type": "tracks", "total": T, "items": [{"pos": N, "name": "..."}, ...]}
+        - {"type": "start", "pos": N, "name": "Artist - Title"}
         - {"type": "pct", "pct": 0-100}
         - {"type": "done", "pos": N, "status": "downloaded"|"skipped"|"missed"|"failed", "pct": 0|100}
     """
@@ -93,6 +94,16 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
     folder = safe_folder_name(pl_name) or pid
     out_dir = work_dir / folder
 
+    # emit full track list upfront so the UI can render all rows immediately
+    event({
+        "type": "tracks",
+        "total": total,
+        "items": [
+            {"pos": t["position"], "name": f"{' - '.join(t['artists'])} - {t['name']}" if t["artists"] else t["name"]}
+            for t in tracks
+        ],
+    })
+
     report(f"[*] {total} tracks. Downloading FLAC from Deezer...")
     report(f"[*] output folder: {out_dir}")
 
@@ -112,12 +123,13 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
         pos = t["position"]
         label = f"[{pos}/{total}] {display[:60]}"
 
+        event({"type": "start", "pos": pos, "name": display[:60]})
+
         # check skip
         existing = find_existing_track(out_dir, t["artists"], t["name"])
         if existing:
             report(f"[{pos}/{total}] {display[:60]}")
             report(f"    [skip] already present: {existing.name}")
-            event({"type": "start", "pos": pos, "total": total, "name": display[:60]})
             event({"type": "done", "pos": pos, "status": "skipped", "pct": 100})
             statuses.append("downloaded")
             skipped += 1
@@ -127,7 +139,6 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
         report(f"[{pos}/{total}] {display[:60]}")
         hit = deezer_search(dz, q, target_title=t["name"], target_artists=t["artists"])
         if not hit:
-            event({"type": "start", "pos": pos, "total": total, "name": display[:60]})
             report("    [deezer] no match")
             event({"type": "done", "pos": pos, "status": "missed", "pct": 0})
             missed.append({"name": t["name"], "artists": t["artists"]})
@@ -135,15 +146,12 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
             continue
         dz_url = hit.get("link")
         if not dz_url:
-            event({"type": "start", "pos": pos, "total": total, "name": display[:60]})
             missed.append({"name": t["name"], "artists": t["artists"]})
             event({"type": "done", "pos": pos, "status": "missed", "pct": 0})
             statuses.append("missed")
             continue
 
         # download
-        event({"type": "start", "pos": pos, "total": total, "name": display[:60]})
-
         def pct_hook(p):
             event({"type": "pct", "pct": p})
 

@@ -108,11 +108,17 @@ def _run_job(job_id, url):
             lines.append(msg)
         def on_event(e):
             t = e.get("type")
-            if t == "start":
+            if t == "tracks":
                 job["progress"]["total"] = e["total"]
-                tracks[e["pos"]] = {"pos": e["pos"], "name": e["name"], "status": "downloading", "pct": None}
+                for item in e["items"]:
+                    tracks[item["pos"]] = {
+                        "pos": item["pos"], "name": item["name"],
+                        "status": "pending", "pct": 0,
+                    }
+            elif t == "start":
+                if e["pos"] in tracks:
+                    tracks[e["pos"]]["status"] = "downloading"
             elif t == "pct":
-                # update the latest downloading track
                 for p in sorted(tracks.keys(), reverse=True):
                     if tracks[p]["status"] == "downloading":
                         tracks[p]["pct"] = e["pct"]
