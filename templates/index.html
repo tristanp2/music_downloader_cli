@@ -81,7 +81,7 @@
 <body>
 <header>
   <h1>music-downloader</h1>
-  <select id="user-select"><option value="tristan">tristan</option><option value="marc">marc</option></select>
+  <select id="user-select"></select>
   <span id="health" class="bad">checking...</span>
 </header>
 <main>
@@ -127,13 +127,41 @@ function setUser(v) {
   }
   for (var folder in libCache) delete libCache[folder];
 }
-var sel = $("#user-select");
-sel.value = getUser();
-sel.addEventListener("change", function() {
-  setUser(sel.value);
-  refreshPlaylists();
-  refreshJobs();
-});
+
+// populate user select from server, then restore saved user
+async function initUserSelect() {
+  try {
+    const r = await fetch("/users");
+    const data = await r.json();
+    const sel = $("#user-select");
+    sel.innerHTML = "";
+    var users = data.users || [];
+    for (var i = 0; i < users.length; i++) {
+      var opt = document.createElement("option");
+      opt.value = users[i];
+      opt.textContent = users[i];
+      sel.appendChild(opt);
+    }
+    var saved = localStorage.getItem("musicdl_user");
+    sel.value = saved && users.indexOf(saved) !== -1 ? saved : (data.default || "");
+    sel.addEventListener("change", function() {
+      setUser(sel.value);
+      refreshPlaylists();
+      refreshJobs();
+    });
+  } catch {
+    // fallback if /users fails
+    var sel = $("#user-select");
+    sel.innerHTML = '<option value="tristan">tristan</option>';
+    sel.value = getUser();
+    sel.addEventListener("change", function() {
+      setUser(sel.value);
+      refreshPlaylists();
+      refreshJobs();
+    });
+  }
+}
+initUserSelect();
 
 /* ---- keyed DOM rendering ---- */
 const knownJobs = {};  // job_id -> { el, metaEl, listEl, summaryEl }

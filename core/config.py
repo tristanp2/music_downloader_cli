@@ -52,6 +52,16 @@ def resolve_output_dir():
     return DEFAULT_WORK_DIR.resolve()
 
 
+def read_users():
+    """Read allowed users from config/settings.conf. Returns list of usernames.
+    Falls back to ['tristan'] if the key is missing."""
+    cfg = read_conf(CONF_SETTINGS)
+    raw = cfg.get("users", "")
+    if not raw.strip():
+        return ["tristan"]
+    return [u.strip() for u in raw.split(",") if u.strip()]
+
+
 def sync_deezer_arl():
     """Make deezer.arl the single source of truth: copy it into config/.arl
     (deemix portable mode reads that). Keeps you from editing two files."""

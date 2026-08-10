@@ -36,7 +36,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from core.config import resolve_output_dir, sync_deezer_arl, ARL, read_conf
+from core.config import resolve_output_dir, sync_deezer_arl, ARL, read_conf, read_users
 from core.deezer import init_deezer
 from core.downloader import run_playlist
 from core.registry import list_playlists
@@ -62,13 +62,13 @@ WORK_DIR_BASE = resolve_output_dir()
 WORK_DIR_BASE.mkdir(parents=True, exist_ok=True)
 
 def _require_user(request: Request) -> str:
-    """Extract ?user= query param. Reject if missing."""
+    """Extract ?user= query param. Reject if missing or not in config whitelist."""
     user = request.query_params.get("user")
     if not user:
         raise HTTPException(status_code=400, detail="missing 'user' query parameter")
-    # sanitize: only alphanumeric, underscore, hyphen
-    if not all(c.isalnum() or c in "_-" for c in user):
-        raise HTTPException(status_code=400, detail="invalid 'user' parameter")
+    allowed = read_users()
+    if user not in allowed:
+        raise HTTPException(status_code=403, detail="user '{}' not in allowed list ({})".format(user, ",".join(allowed)))
     return user
 
 def _resolve_user_path(user: str, folder: str) -> Path:
@@ -256,6 +256,12 @@ def job_status(job_id: str):
         "log": j["log"][-200:], "result": j["result"],
         "progress": j.get("progress"),
     }
+
+
+@app.get("/users")
+def get_users():
+    users = read_users()
+    return {"users": users, "default": users[0] if users else None}
 
 
 @app.get("/playlists")

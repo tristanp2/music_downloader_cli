@@ -16,7 +16,7 @@ REPO = Path(__file__).resolve().parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from core.config import resolve_output_dir, sync_deezer_arl, ARL, die
+from core.config import resolve_output_dir, sync_deezer_arl, ARL, die, read_users
 from core.deezer import init_deezer
 from core.downloader import run_playlist
 from core import server_lock
@@ -24,10 +24,11 @@ from core import server_lock
 
 def main():
     ap = argparse.ArgumentParser(description="Spotify -> FLAC downloader")
-    ap.add_argument("--user", required=False, default="tristan",
-                    help="User name for playlist directory (default: tristan)")
+    ap.add_argument("--user", required=False, default=None,
+                    help="User name for playlist directory (default: first in config users list)")
     args = ap.parse_args()
-    user = args.user
+    users = read_users()
+    user = args.user if args.user else users[0]
 
     if not ARL.is_file():
         die("deezer.arl missing (Deezer HiFi session token).")
