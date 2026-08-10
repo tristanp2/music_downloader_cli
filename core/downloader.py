@@ -125,7 +125,7 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None):
             statuses.append("missed")
             continue
 
-        flac = deemix_download(dz, dz_url, settings, out_dir, label)
+        flac = deemix_download(dz, dz_url, settings, out_dir, label, on_progress=on_progress)
         if flac:
             final = tag_and_rename(flac, pos, len(tracks))
             report(f"    [deezer] FLAC downloaded -> {final.name}")

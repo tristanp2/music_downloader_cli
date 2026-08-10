@@ -1,6 +1,7 @@
 """Deezer session init, search (with Jaccard title scoring), and FLAC download
 via deemix. The ProgressListener bridges deemix to a rich progress bar.
 """
+import contextlib
 import re
 from pathlib import Path
 
@@ -94,42 +95,73 @@ def deezer_search(dz, query, target_title=None, target_artists=None):
 # ---------------------------------------------------------------------------
 
 class ProgressListener:
-    """Bridge deemix's listener interface to a rich progress bar.
+    """Bridge deemix's listener interface to progress reporting.
 
-    deemix calls .send(key, value). We render a per-track bar from the
-    'updateQueue' event (value['progress'] is 0-100 for the current track).
-    Other events are shown as soft status lines so nothing is silently dropped.
+    Two modes:
+    - CLI (on_progress is None): render a live rich progress bar via the
+      `progress`/`task_id` handles.
+    - server/cron (on_progress is set): emit plain text lines in ~10%
+      increments. The rich TUI is suppressed because its ANSI control codes
+      mangle the server log / interleave with uvicorn access logs.
+
+    deemix calls .send(key, value); value['progress'] is 0-100 for the
+    current track. In server mode we only log when the integer percent jumps
+    to a new 10% bucket, so a long download doesn't flood the log.
     """
-    def __init__(self, progress, task_id, label):
+    def __init__(self, progress=None, task_id=None, label="", on_progress=None):
         self.progress = progress
         self.task_id = task_id
         self.label = label
+        self.on_progress = on_progress
+        self._last_bucket = -1
 
     def send(self, key, value=None):
         if key == "updateQueue" and isinstance(value, dict):
             pct = value.get("progress")
             if isinstance(pct, (int, float)):
-                self.progress.update(self.task_id, completed=int(pct))
+                if self.on_progress is not None:
+                    bucket = int(pct // 10)
+                    if bucket != self._last_bucket:
+                        self._last_bucket = bucket
+                        msg = f"    {self.label} [{int(pct)}%]"
+                        self.on_progress(msg)
+                        print(msg, flush=True)
+                    return
+                if self.progress is not None:
+                    self.progress.update(self.task_id, completed=int(pct))
                 return
         if key == "downloadInfo" and isinstance(value, dict):
             state = value.get("state")
             if state in ("downloading", "getBitrate", "getTags", "getAlbumArt",
                          "tagging", "downloaded", "alreadyDownloaded"):
-                self.progress.update(self.task_id, description=f"{self.label} [{state}]")
+                if self.on_progress is not None:
+                    msg = f"    {self.label} [{state}]"
+                    self.on_progress(msg)
+                    print(msg, flush=True)
+                elif self.progress is not None:
+                    self.progress.update(self.task_id, description=f"{self.label} [{state}]")
             return
         # fall back to deemix's own human-readable line for anything else
         from deemix.utils import formatListener
         line = formatListener(key, value)
         if line:
-            self.progress.console.print(f"    {line}")
+            if self.on_progress is not None:
+                self.on_progress(f"    {line}")
+                print(f"    {line}", flush=True)
+            elif self.progress is not None:
+                self.progress.console.print(f"    {line}")
 
 
-def deemix_download(dz, deezer_url, settings, out_dir, label):
+def deemix_download(dz, deezer_url, settings, out_dir, label, on_progress=None):
     """Download a Deezer URL as FLAC via the deemix library (not subprocess).
 
     Forces a FLAT layout (no artist/album subfolders) so the file lands directly
     in out_dir, which keeps playlist ordering sane for players like the Denon
     Prime 4. Returns the downloaded FLAC path, or None on failure.
+
+    on_progress: when set (server/cron), the live rich progress bar is
+    suppressed and ProgressListener logs plain ~10%-increment text lines
+    through on_progress instead, so server logs stay clean (no ANSI garbage).
 
     Robustness: we snapshot the .flac filenames present BEFORE the download and
     then identify the genuinely NEW file afterwards. Relying on "newest mtime"
@@ -152,14 +184,25 @@ def deemix_download(dz, deezer_url, settings, out_dir, label):
     except Exception as e:
         print(f"    [deezer] generate failed: {e}")
         return None
-    with Progress(
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        transient=True,
-    ) as progress:
-        task_id = progress.add_task(label, total=100)
-        listener = ProgressListener(progress, task_id, label)
+    listener = ProgressListener(on_progress=on_progress, label=label)
+    if on_progress is None:
+        # CLI mode: live rich bar
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            transient=True,
+        ) as progress:
+            task_id = progress.add_task(label, total=100)
+            listener.progress = progress
+            listener.task_id = task_id
+            try:
+                Downloader(dz, download_object, settings, listener=listener).start()
+            except Exception as e:
+                print(f"    [deezer] download failed: {e}")
+                return None
+    else:
+        # server/cron mode: no TUI, plain logged increments only
         try:
             Downloader(dz, download_object, settings, listener=listener).start()
         except Exception as e:
