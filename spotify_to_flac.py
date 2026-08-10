@@ -18,6 +18,7 @@ if str(REPO) not in sys.path:
 from core.config import resolve_output_dir, sync_deezer_arl, ARL, die
 from core.deezer import init_deezer
 from core.downloader import run_playlist
+from core import server_lock
 
 
 def main():
@@ -29,6 +30,9 @@ def main():
     WORK_DIR = resolve_output_dir()
     WORK_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Build a local Deezer session for the fallback case (only used when the
+    # web server is NOT running). When the server IS up, cli_dispatch posts to
+    # it instead and this session is never touched.
     dz = init_deezer(arl_text)
     settings = __import__("deemix.settings", fromlist=["load"]).load(REPO / "config")
 
@@ -48,7 +52,7 @@ def main():
             print("bye.")
             break
 
-        result = run_playlist(url, dz, settings, work_dir=WORK_DIR)
+        result = server_lock.cli_dispatch(url, dz=dz, settings=settings, work_dir=WORK_DIR)
         if not result.get("ok"):
             print(f"[skip] {result.get('error', 'unknown error')}")
             continue

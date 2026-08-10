@@ -19,6 +19,7 @@ from .spotify import (
 from .deezer import init_deezer, deezer_search, deemix_download
 from .library import find_existing_track, tag_and_rename, write_meta
 from .config import resolve_output_dir, sync_deezer_arl, read_conf
+from . import server_lock
 
 __all__ = [
     "run_playlist",
@@ -36,4 +37,5 @@ __all__ = [
     "resolve_output_dir",
     "sync_deezer_arl",
     "read_conf",
+    "server_lock",
 ]
