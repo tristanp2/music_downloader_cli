@@ -58,8 +58,26 @@ except Exception as _e:
     print(f"[warn] could not load deemix settings: {_e}")
     SETTINGS = {}
 
-WORK_DIR = resolve_output_dir()
-WORK_DIR.mkdir(parents=True, exist_ok=True)
+WORK_DIR_BASE = resolve_output_dir()
+WORK_DIR_BASE.mkdir(parents=True, exist_ok=True)
+
+def _require_user(request: Request) -> str:
+    """Extract ?user= query param. Reject if missing."""
+    user = request.query_params.get("user")
+    if not user:
+        raise HTTPException(status_code=400, detail="missing 'user' query parameter")
+    # sanitize: only alphanumeric, underscore, hyphen
+    if not all(c.isalnum() or c in "_-" for c in user):
+        raise HTTPException(status_code=400, detail="invalid 'user' parameter")
+    return user
+
+def _resolve_user_path(user: str, folder: str) -> Path:
+    """Safely resolve {WORK_DIR_BASE}/{user}/{folder}."""
+    fp = (WORK_DIR_BASE / user / folder).resolve()
+    base = str(WORK_DIR_BASE.resolve())
+    if not str(fp).startswith(base):
+        raise HTTPException(status_code=403, detail="invalid path")
+    return fp
 
 DZ = None          # the one Deezer session, set in startup()
 DZ_LOCK = threading.Lock()   # serialize Deezer calls (session not thread-safe)
@@ -95,13 +113,15 @@ def _deezer_session_ok():
 # job runner
 # ---------------------------------------------------------------------------
 
-def _run_job(job_id, url):
+def _run_job(job_id, url, user):
     """Background thread: run the playlist and stream progress into the job."""
     global DZ
     job = JOBS[job_id]
     job["progress"] = {"total": None, "tracks": {}}
     lines = job["log"]
     tracks = job["progress"]["tracks"]
+    work_dir = WORK_DIR_BASE / user
+    work_dir.mkdir(parents=True, exist_ok=True)
     with DZ_LOCK:
         def on_progress(msg):
             lines.append(msg)
@@ -127,7 +147,7 @@ def _run_job(job_id, url):
                 if pos in tracks:
                     tracks[pos].update(status=e["status"], pct=e["pct"])
         try:
-            result = run_playlist(url, DZ, SETTINGS, work_dir=WORK_DIR,
+            result = run_playlist(url, DZ, SETTINGS, work_dir=work_dir,
                                   on_progress=on_progress, on_event=on_event)
         except Exception as e:
             result = {"ok": False, "error": f"run_playlist raised: {e}"}
@@ -186,6 +206,7 @@ def index():
 @app.post("/download")
 def download(request: Request, payload: dict):
     _authenticate(request)
+    user = _require_user(request)
     url = (payload or {}).get("url", "")
     if not url:
         raise HTTPException(status_code=400, detail="missing 'url'")
@@ -198,22 +219,25 @@ def download(request: Request, payload: dict):
         JOBS[job_id] = {
             "id": job_id,
             "url": url,
+            "user": user,
             "status": "running",
             "log": [],
             "result": None,
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "finished_at": None,
         }
-    threading.Thread(target=_run_job, args=(job_id, url), daemon=True).start()
+    threading.Thread(target=_run_job, args=(job_id, url, user), daemon=True).start()
     return {"job_id": job_id}
 
 
 @app.get("/jobs")
-def jobs():
+def jobs(request: Request):
+    user = _require_user(request)
     with JOBS_LOCK:
         items = sorted(JOBS.values(), key=lambda j: j["started_at"], reverse=True)
     return {"jobs": [{
-        "id": j["id"], "url": j["url"], "status": j["status"],
+        "id": j["id"], "url": j["url"], "user": j.get("user"),
+        "status": j["status"],
         "started_at": j["started_at"], "finished_at": j["finished_at"],
         "log": j["log"][-200:], "result": j["result"],
         "progress": j.get("progress"),
@@ -235,8 +259,9 @@ def job_status(job_id: str):
 
 
 @app.get("/playlists")
-def playlists():
-    return {"playlists": list_playlists(WORK_DIR)}
+def playlists(request: Request):
+    user = _require_user(request)
+    return {"playlists": list_playlists(WORK_DIR_BASE / user)}
 
 
 @app.get("/health")
@@ -255,11 +280,9 @@ def health():
 import zipfile, io
 
 @app.get("/library/{folder}")
-def library_folder(folder: str):
-    # resolve safely under WORK_DIR
-    fp = (WORK_DIR / folder).resolve()
-    if not str(fp).startswith(str(WORK_DIR.resolve())):
-        raise HTTPException(status_code=403, detail="invalid path")
+def library_folder(request: Request, folder: str):
+    user = _require_user(request)
+    fp = _resolve_user_path(user, folder)
     meta = fp / "playlist.meta.json"
     if not meta.is_file():
         raise HTTPException(status_code=404, detail="playlist.meta.json not found")
@@ -281,11 +304,9 @@ def library_folder(folder: str):
 
 
 @app.get("/zip/{folder}")
-def download_zip(folder: str):
-    # resolve safely under WORK_DIR only
-    fp = (WORK_DIR / folder).resolve()
-    if not str(fp).startswith(str(WORK_DIR.resolve())):
-        raise HTTPException(status_code=403, detail="invalid path")
+def download_zip(request: Request, folder: str):
+    user = _require_user(request)
+    fp = _resolve_user_path(user, folder)
     if not fp.is_dir():
         raise HTTPException(status_code=404, detail="playlist folder not found")
     safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in folder)

@@ -9,6 +9,7 @@
   body { font-family: system-ui, sans-serif; margin: 0; background: #14161a; color: #e6e6e6; }
   header { padding: 14px 20px; background: #1d2027; border-bottom: 1px solid #2a2e38; display: flex; align-items: center; gap: 16px; }
   header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  #user-select { padding: 4px 8px; background: #11131a; border: 1px solid #333a47; color: #e6e6e6; border-radius: 6px; font-size: 12px; cursor: pointer; }
   #health { font-size: 12px; padding: 3px 9px; border-radius: 20px; background: #333; }
   #health.ok { background: #1f5132; }
   #health.bad { background: #6b2222; }
@@ -80,6 +81,7 @@
 <body>
 <header>
   <h1>music-downloader</h1>
+  <select id="user-select"><option value="tristan">tristan</option><option value="marc">marc</option></select>
   <span id="health" class="bad">checking...</span>
 </header>
 <main>
@@ -108,6 +110,30 @@
 const $ = (s) => document.querySelector(s);
 const token = new URLSearchParams(location.search).get("token") || null;
 const icons = { pending: "\u00b7", downloading: "\u25cb", downloaded: "\u2713", skipped: "\u25b6", missed: "\u2717", failed: "!" };
+
+/* ---- current user (localStorage) ---- */
+function getUser() {
+  var v = localStorage.getItem("musicdl_user");
+  if (v === "tristan" || v === "marc") return v;
+  return "tristan";
+}
+function setUser(v) {
+  localStorage.setItem("musicdl_user", v);
+  // clear lib state when switching users
+  for (var fid in knownLib) {
+    knownLib[fid].row.remove();
+    knownLib[fid].detail.remove();
+    delete knownLib[fid];
+  }
+  for (var folder in libCache) delete libCache[folder];
+}
+var sel = $("#user-select");
+sel.value = getUser();
+sel.addEventListener("change", function() {
+  setUser(sel.value);
+  refreshPlaylists();
+  refreshJobs();
+});
 
 /* ---- keyed DOM rendering ---- */
 const knownJobs = {};  // job_id -> { el, metaEl, listEl, summaryEl }
@@ -233,7 +259,7 @@ function updateJobCard(j) {
         zipBtn.className = "zip-btn";
         zipBtn.textContent = "Download ZIP";
         zipBtn.addEventListener("click", () => {
-          window.location.href = "/zip/" + encodeURIComponent(j.result.folder);
+          window.location.href = "/zip/" + encodeURIComponent(j.result.folder) + "?user=" + encodeURIComponent(j.user);
         });
         summaryEl.appendChild(zipBtn);
       }
@@ -277,7 +303,9 @@ function syncJobs(jobs) {
 async function postDownload(url) {
   const headers = { "Content-Type": "application/json" };
   if (token) headers["X-Auth-Token"] = token;
-  const r = await fetch("/download", { method: "POST", headers, body: JSON.stringify({ url }) });
+  const r = await fetch("/download?user=" + encodeURIComponent(getUser()), {
+    method: "POST", headers, body: JSON.stringify({ url })
+  });
   if (!r.ok) { const e = await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail || r.statusText); }
   return r.json();
 }
@@ -293,7 +321,7 @@ async function refreshHealth() {
 
 async function refreshJobs() {
   try {
-    const r = await fetch("/jobs");
+    const r = await fetch("/jobs?user=" + encodeURIComponent(getUser()));
     const data = await r.json();
     syncJobs(data.jobs || []);
   } catch {}
@@ -301,7 +329,7 @@ async function refreshJobs() {
 
 async function refreshPlaylists() {
   try {
-    const r = await fetch("/playlists");
+    const r = await fetch("/playlists?user=" + encodeURIComponent(getUser()));
     const data = await r.json();
     const rows = data.playlists || [];
     const tb = $("#playlists tbody");
@@ -354,7 +382,7 @@ async function refreshPlaylists() {
         const zipTd = document.createElement("td");
         const zipLink = document.createElement("a");
         zipLink.className = "zip-link";
-        zipLink.href = "/zip/" + encodeURIComponent(p.folder);
+        zipLink.href = "/zip/" + encodeURIComponent(p.folder) + "?user=" + encodeURIComponent(getUser());
         zipLink.textContent = "ZIP";
         zipTd.appendChild(zipLink);
         row.appendChild(zipTd);
@@ -418,7 +446,7 @@ window.toggleLib = async function(row) {
   if (!libCache[folder]) {
     ctx.inner.innerHTML = '<div class="empty">loading...</div>';
     try {
-      const r2 = await fetch("/library/" + encodeURIComponent(folder));
+      const r2 = await fetch("/library/" + encodeURIComponent(folder) + "?user=" + encodeURIComponent(getUser()));
       const pd = await r2.json();
       libCache[folder] = pd.tracks || [];
     } catch {

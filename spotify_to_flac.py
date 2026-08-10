@@ -8,6 +8,7 @@ same code. This file only:
   2. Loops: prompt for a Spotify URL, call core.run_playlist(), print result.
 """
 import sys
+import argparse
 from pathlib import Path
 
 # ensure <repo>/ is on sys.path so `import core` works when run as a script
@@ -22,12 +23,18 @@ from core import server_lock
 
 
 def main():
+    ap = argparse.ArgumentParser(description="Spotify -> FLAC downloader")
+    ap.add_argument("--user", required=False, default="tristan",
+                    help="User name for playlist directory (default: tristan)")
+    args = ap.parse_args()
+    user = args.user
+
     if not ARL.is_file():
         die("deezer.arl missing (Deezer HiFi session token).")
 
     arl_text = ARL.read_text(encoding="utf-8").strip()
     sync_deezer_arl()  # single source of truth -> config/.arl for deemix
-    WORK_DIR = resolve_output_dir()
+    WORK_DIR = resolve_output_dir() / user
     WORK_DIR.mkdir(parents=True, exist_ok=True)
 
     # Build a local Deezer session for the fallback case (only used when the
@@ -36,7 +43,7 @@ def main():
     dz = init_deezer(arl_text)
     settings = __import__("deemix.settings", fromlist=["load"]).load(REPO / "config")
 
-    print("=== Spotify -> FLAC (Deezer) ===")
+    print(f"=== Spotify -> FLAC (Deezer)  [user: {user}] ===")
     srv_port = server_lock.server_is_up()
     if srv_port is not None:
         print(f"[mode] routing through web server on port {srv_port} "
@@ -58,7 +65,7 @@ def main():
             print("bye.")
             break
 
-        result = server_lock.cli_dispatch(url, dz=dz, settings=settings, work_dir=WORK_DIR)
+        result = server_lock.cli_dispatch(url, dz=dz, settings=settings, work_dir=WORK_DIR, user=user)
         if not result.get("ok"):
             # server mode returns an error dict (e.g. job POST failed) without a
             # [skip] tag; local mode returns run_playlist's error dict too.

@@ -20,6 +20,7 @@ ignores and falls back to local mode.
 import json
 import os
 import sys
+import urllib.parse
 from pathlib import Path
 
 from .config import REPO, read_conf
@@ -127,7 +128,7 @@ def _server_token():
     return cfg.get("server_token") or None
 
 
-def cli_dispatch(url, dz=None, settings=None, work_dir=None):
+def cli_dispatch(url, dz=None, settings=None, work_dir=None, user=None):
     """Route a download request: POST to the running server if up, else run
     locally via the core lib.
 
@@ -139,7 +140,7 @@ def cli_dispatch(url, dz=None, settings=None, work_dir=None):
     """
     port = server_is_up()
     if port is not None:
-        r = _post_to_server(port, url)
+        r = _post_to_server(port, url, user=user)
         r["routed"] = "server"
         r["port"] = port
         return r
@@ -152,7 +153,7 @@ def cli_dispatch(url, dz=None, settings=None, work_dir=None):
     return r
 
 
-def _post_to_server(port, url):
+def _post_to_server(port, url, user=None):
     """POST {url} to the running server's /download endpoint. Returns the
     server's JSON result dict. Network errors surface as an error dict so the
     CLI can still report cleanly."""
@@ -161,8 +162,10 @@ def _post_to_server(port, url):
 
     token = _server_token()
     body = json.dumps({"url": url}).encode("utf-8")
+    qs = urllib.parse.urlencode({"user": user}) if user else ""
+    req_url = f"http://localhost:{port}/download?{qs}"
     req = urllib.request.Request(
-        f"http://localhost:{port}/download",
+        req_url,
         data=body,
         headers={"Content-Type": "application/json"},
         method="POST",
