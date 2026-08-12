@@ -262,6 +262,9 @@
   ::-webkit-scrollbar-track { background: var(--bg); }
   ::-webkit-scrollbar-thumb { background: var(--border); }
   ::-webkit-scrollbar-thumb:hover { background: var(--border-h); }
+
+  .update-link, .zip-link { color: var(--text-b); text-decoration: none; border-bottom: 1px dotted var(--border-h); }
+  .update-link:hover, .zip-link:hover { color: #fff; }
 </style>
 </head>
 <body>
@@ -286,8 +289,8 @@
   <section class="card" style="grid-column: 1 / -1;">
     <h2>library</h2>
     <table id="playlists">
-      <thead><tr><th></th><th>Folder</th><th>Name</th><th>Total</th><th>Down</th><th>Miss</th><th>Fetched</th><th>ZIP</th></tr></thead>
-      <tbody><tr><td colspan="8" class="empty">loading...</td></tr></tbody>
+      <thead><tr><th></th><th>folder</th><th>name</th><th>total</th><th>down</th><th>miss</th><th>fetched</th><th>update</th><th>zip</th></tr></thead>
+      <tbody><tr><td colspan="9" class="empty">loading...</td></tr></tbody>
     </table>
   </section>
 </main>
@@ -648,7 +651,7 @@ async function refreshPlaylists() {
         knownLib[folder].detail.remove();
         delete knownLib[folder];
       }
-      tb.innerHTML = '<tr><td colspan="8" class="empty">No playlists yet.</td></tr>';
+      tb.innerHTML = '<tr><td colspan="9" class="empty">No playlists yet.</td></tr>';
       return;
     }
     const emptyEl = tb.querySelector(".empty");
@@ -685,11 +688,25 @@ async function refreshPlaylists() {
         row.appendChild(missTd);
         const fetchTd = document.createElement("td");
         row.appendChild(fetchTd);
+        const updateTd = document.createElement("td");
+        const updateLink = document.createElement("a");
+        updateLink.className = "update-link";
+        updateLink.href = "#";
+        updateLink.textContent = "update";
+        updateLink.dataset.url = p.spotify_url || "";
+        updateLink.onclick = function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          startUpdate(this.dataset.url);
+        };
+        updateTd.appendChild(updateLink);
+        row.appendChild(updateTd);
         const zipTd = document.createElement("td");
         const zipLink = document.createElement("a");
         zipLink.className = "zip-link";
         zipLink.href = "/zip/" + encodeURIComponent(p.folder) + "?user=" + encodeURIComponent(getUser());
-        zipLink.textContent = "ZIP";
+        zipLink.textContent = "zip";
+        zipLink.onclick = function(e) { e.stopPropagation(); };
         zipTd.appendChild(zipLink);
         row.appendChild(zipTd);
 
@@ -697,7 +714,7 @@ async function refreshPlaylists() {
         detail.className = "lib-detail";
         detail.dataset.fid = fid;
         const detailTd = document.createElement("td");
-        detailTd.colSpan = 8;
+        detailTd.colSpan = 9;
         const inner = document.createElement("div");
         inner.className = "lib-detail-inner";
         inner.id = "inner-" + fid;
@@ -790,6 +807,24 @@ $("#go").addEventListener("click", async () => {
     $("#msg").textContent = "error: " + e.message;
   }
 });
+
+// Re-download a playlist already in the library (Update button). Reuses the
+// existing /download endpoint with the playlist's stored Spotify URL; the
+// backend skip-check means only missing/partial tracks are actually fetched.
+async function startUpdate(url) {
+  if (!url) { $("#msg").textContent = "error: playlist has no stored Spotify URL"; return; }
+  $("#msg").textContent = "updating playlist...";
+  try {
+    const r = await postDownload(url);
+    $("#msg").textContent = "job " + r.job_id + " started (update)";
+    var ctx = ensureJobCard({ id: r.job_id, url: url, user: getUser(), status: "running" });
+    ctx.metaEl.innerHTML = '<span class="badge running">running</span> &nbsp; ' + esc(url);
+    watchJob(r.job_id);
+    refreshJobs();
+  } catch (e) {
+    $("#msg").textContent = "error: " + e.message;
+  }
+}
 
 async function tick() {
   await refreshHealth();
