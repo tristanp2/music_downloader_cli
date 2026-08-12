@@ -186,7 +186,10 @@ def deemix_download(dz, deezer_url, settings, out_dir, label, on_progress=None, 
         download_object = generateDownloadObject(dz, deezer_url, TrackFormats.FLAC,
                                                   None, None)
     except Exception as e:
-        print(f"    [deezer] generate failed: {e}")
+        msg = f"    [deezer] generate failed: {e}"
+        if on_progress:
+            on_progress(msg)
+        print(msg)
         return None
     listener = ProgressListener(on_progress=on_progress, label=label)
     if on_progress is None:
@@ -203,7 +206,10 @@ def deemix_download(dz, deezer_url, settings, out_dir, label, on_progress=None, 
             try:
                 Downloader(dz, download_object, settings, listener=listener).start()
             except Exception as e:
-                print(f"    [deezer] download failed: {e}")
+                msg = f"    [deezer] download failed: {e}"
+                if on_progress:
+                    on_progress(msg)
+                print(msg)
                 return None
     else:
         # server/cron mode: no TUI, wire on_pct for structured events

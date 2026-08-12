@@ -9,9 +9,14 @@ import re
 import time
 import urllib.parse
 import urllib.request
+import urllib.error
 import webbrowser
 import http.server
 import threading
+
+
+SPOTIFY_SCOPE = "playlist-read-private playlist-read-collaborative"
+
 
 from .config import read_conf, CONF_SETTINGS, SPOTIFY_TOKEN_CACHE, SPOTIFY_REDIRECT, die
 
@@ -24,6 +29,9 @@ def _spotify_api_get(token, url):
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read().decode("utf-8"))
+
+
+
 
 
 def _exchange_code_for_token(client_id, client_secret, code):
@@ -121,7 +129,7 @@ def get_spotify_token_silent():
 
 
 def _do_auth_code_flow(client_id, client_secret):
-    scope = "playlist-read-private playlist-read-collaborative"
+    scope = SPOTIFY_SCOPE
     auth_url = ("https://accounts.spotify.com/authorize?" +
                 urllib.parse.urlencode({
                     "client_id": client_id,

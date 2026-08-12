@@ -86,8 +86,7 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
         return out
 
     if not tracks:
-        out.update(ok=True, name=pl_name, folder=Path(""), downloaded=0, skipped=0,
-                   missed=0, failed=0, missed_tracks=[])
+        out.update(ok=False, error=f"no tracks found in playlist '{pl_name}' (id={pid}) -- the playlist may be empty or inaccessible")
         return out
 
     total = len(tracks)

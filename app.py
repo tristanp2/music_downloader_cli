@@ -30,6 +30,7 @@ import threading
 import uuid
 import atexit
 import json
+import traceback
 from pathlib import Path
 
 from fastapi import FastAPI, Request, HTTPException
@@ -150,7 +151,11 @@ def _run_job(job_id, url, user):
             result = run_playlist(url, DZ, SETTINGS, work_dir=work_dir,
                                   on_progress=on_progress, on_event=on_event)
         except Exception as e:
-            result = {"ok": False, "error": f"run_playlist raised: {e}"}
+            tb = traceback.format_exc()
+            lines.append(f"[error] run_playlist raised: {e}")
+            for line in tb.strip().split("\n"):
+                lines.append(f"[error]   {line}")
+            result = {"ok": False, "error": f"run_playlist raised: {e}", "traceback": tb}
     job["result"] = result
     job["status"] = "done" if result.get("ok") else "error"
     job["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
