@@ -71,7 +71,9 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
 
     pid = validate_spotify_url(url)
     if not pid:
-        out.update(ok=False, error="not a valid open.spotify.com playlist/album/track URL.")
+        msg = "[!] Not a valid open.spotify.com playlist/album/track URL."
+        report(msg)
+        out.update(ok=False, error=msg)
         return out
 
     try:
@@ -79,7 +81,9 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
     except SystemExit:
         raise
     except Exception as e:
-        out.update(ok=False, error=f"Spotify auth failed: {e}")
+        msg = f"[!] Spotify auth failed: {e}"
+        report(msg)
+        out.update(ok=False, error=msg)
         return out
 
     try:
@@ -87,11 +91,15 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
         tracks = parsed["tracks"]
         pl_name = parsed["name"]
     except Exception as e:
-        out.update(ok=False, error=f"playlist parse failed: {e}")
+        msg = f"[!] Playlist parse failed: {e}"
+        report(msg)
+        out.update(ok=False, error=msg)
         return out
 
     if not tracks:
-        out.update(ok=False, error=f"no tracks found in playlist '{pl_name}' (id={pid}) -- the playlist may be empty or inaccessible")
+        msg = f"[!] No tracks found in playlist '{pl_name}' (id={pid}) -- the playlist may be empty or inaccessible"
+        report(msg)
+        out.update(ok=False, error=msg)
         return out
 
     total = len(tracks)
