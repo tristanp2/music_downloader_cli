@@ -103,7 +103,7 @@ class ProgressListener:
     Two modes:
     - CLI (on_progress is None): render a live rich progress bar via the
       `progress`/`task_id` handles.
-    - server/cron (on_progress is set): emit plain text lines in ~10%
+    - server/cron (on_progress is set): emit plain text lines in ~BUCKET_SIZE%
       increments. The rich TUI is suppressed because its ANSI control codes
       mangle the server log / interleave with uvicorn access logs.
 
@@ -111,6 +111,9 @@ class ProgressListener:
     current track. In server mode we only log when the integer percent jumps
     to a new 10% bucket, so a long download doesn't flood the log.
     """
+
+    BUCKET_SIZE = 25
+
     def __init__(self, progress=None, task_id=None, label="", on_progress=None):
         self.progress = progress
         self.task_id = task_id
@@ -123,12 +126,12 @@ class ProgressListener:
             pct = value.get("progress")
             if isinstance(pct, (int, float)):
                 pct_int = int(pct)
-                bucket = pct_int // 10
+                bucket = pct_int // self.BUCKET_SIZE
                 # Throttle both SSE and text logging to 10% buckets.
                 if bucket == self._last_bucket:
                     return
                 self._last_bucket = bucket
-                rounded_pct = bucket * 10
+                rounded_pct = bucket * self.BUCKET_SIZE
                 # structured event callback (server mode)
                 if getattr(self, '_on_pct', None):
                     self._on_pct(rounded_pct)
@@ -169,7 +172,7 @@ def deemix_download(dz, deezer_url, settings, out_dir, label, on_progress=None, 
     Prime 4. Returns the downloaded FLAC path, or None on failure.
 
     on_progress: when set (server/cron), the live rich progress bar is
-    suppressed and ProgressListener logs plain ~10%-increment text lines
+    suppressed and ProgressListener logs plain increment text lines
     through on_progress instead, so server logs stay clean (no ANSI garbage).
     on_pct: when set, fires on_pct(pct_int) for every deemix updateQueue event.
 
