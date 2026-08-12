@@ -439,6 +439,7 @@ function renderTrackRow(listEl, track, total) {
     barFill2.style.width = (track.pct != null ? track.pct : 0) + "%";
     barFill2.className = "fill";
   } else {
+    barFill2.style.width = "100%";
     barFill2.className = "fill done";
   }
 
@@ -464,24 +465,12 @@ function updateJobCard(j) {
     renderTrackRow(listEl, trackArr[i], total);
   }
 
-  listEl.style.display = trackArr.length ? "" : "none";
+  listEl.style.display = (trackArr.length || j.status === "running") ? "" : "none";
 
   if (j.result && j.result.ok) {
     const r = j.result;
     summaryEl.className = "stats";
     summaryEl.textContent = "downloaded " + r.downloaded + " / skipped " + r.skipped + " / missed " + r.missed + " / failed " + r.failed;
-    if (j.result.folder) {
-      let zipBtn = summaryEl.querySelector(".zip-btn");
-      if (!zipBtn) {
-        zipBtn = document.createElement("button");
-        zipBtn.className = "zip-btn";
-        zipBtn.textContent = "[ zip ]";
-        zipBtn.addEventListener("click", () => {
-          window.location.href = "/zip/" + encodeURIComponent(j.result.folder) + "?user=" + encodeURIComponent(j.user);
-        });
-        summaryEl.appendChild(zipBtn);
-      }
-    }
   } else if (j.result && j.result.error) {
     summaryEl.className = "error-summary";
     summaryEl.textContent = j.result.error;
