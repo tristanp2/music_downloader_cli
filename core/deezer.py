@@ -2,6 +2,7 @@
 via deemix. The ProgressListener bridges deemix to a rich progress bar.
 """
 import contextlib
+import logging
 import re
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from deemix.downloader import Downloader
 from rich.progress import Progress, BarColumn, TextColumn, TaskProgressColumn
 
 from .config import REPO
+
+log = logging.getLogger("musicdl")
 
 
 # ---------------------------------------------------------------------------
@@ -119,17 +122,20 @@ class ProgressListener:
         if key == "updateQueue" and isinstance(value, dict):
             pct = value.get("progress")
             if isinstance(pct, (int, float)):
+                pct_int = int(pct)
+                bucket = pct_int // 10
+                # Throttle both SSE and text logging to 10% buckets.
+                if bucket == self._last_bucket:
+                    return
+                self._last_bucket = bucket
+                rounded_pct = bucket * 10
                 # structured event callback (server mode)
                 if getattr(self, '_on_pct', None):
-                    self._on_pct(int(pct))
+                    self._on_pct(rounded_pct)
                 if self.on_progress is not None:
-                    bucket = int(pct // 10)
-                    if bucket != self._last_bucket:
-                        self._last_bucket = bucket
-                        msg = f"    {self.label} [{int(pct)}%]"
-                        self.on_progress(msg)
-                        print(msg, flush=True)
-                    return
+                    msg = f"    {self.label} [{rounded_pct}%]"
+                    log.info(msg)
+                    self.on_progress(msg)
                 if self.progress is not None:
                     self.progress.update(self.task_id, completed=int(pct))
                 return
@@ -139,8 +145,8 @@ class ProgressListener:
                          "tagging", "downloaded", "alreadyDownloaded"):
                 if self.on_progress is not None:
                     msg = f"    {self.label} [{state}]"
+                    log.info(msg)
                     self.on_progress(msg)
-                    print(msg, flush=True)
                 elif self.progress is not None:
                     self.progress.update(self.task_id, description=f"{self.label} [{state}]")
             return
@@ -150,7 +156,7 @@ class ProgressListener:
         if line:
             if self.on_progress is not None:
                 self.on_progress(f"    {line}")
-                print(f"    {line}", flush=True)
+                log.info("    %s", line)
             elif self.progress is not None:
                 self.progress.console.print(f"    {line}")
 
@@ -187,9 +193,9 @@ def deemix_download(dz, deezer_url, settings, out_dir, label, on_progress=None, 
                                                   None, None)
     except Exception as e:
         msg = f"    [deezer] generate failed: {e}"
+        log.warning(msg)
         if on_progress:
             on_progress(msg)
-        print(msg)
         return None
     listener = ProgressListener(on_progress=on_progress, label=label)
     if on_progress is None:
@@ -207,9 +213,9 @@ def deemix_download(dz, deezer_url, settings, out_dir, label, on_progress=None, 
                 Downloader(dz, download_object, settings, listener=listener).start()
             except Exception as e:
                 msg = f"    [deezer] download failed: {e}"
+                log.warning(msg)
                 if on_progress:
                     on_progress(msg)
-                print(msg)
                 return None
     else:
         # server/cron mode: no TUI, wire on_pct for structured events
@@ -217,7 +223,7 @@ def deemix_download(dz, deezer_url, settings, out_dir, label, on_progress=None, 
         try:
             Downloader(dz, download_object, settings, listener=listener).start()
         except Exception as e:
-            print(f"    [deezer] download failed: {e}")
+            log.warning("    [deezer] download failed: %s", e)
             return None
     # Identify the file we just created: it must be NEWER than the baseline
     # captured before the download started. A genuinely failed download (e.g.

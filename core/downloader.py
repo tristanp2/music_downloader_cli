@@ -19,6 +19,7 @@ Returns a dict:
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 import time
 
@@ -26,6 +27,8 @@ from .config import resolve_output_dir, sync_deezer_arl, read_conf
 from .spotify import safe_folder_name, validate_spotify_url, get_spotify_token, parse_spotify_playlist
 from .deezer import deezer_search, deemix_download
 from .library import find_existing_track, tag_and_rename, write_meta
+
+log = logging.getLogger("musicdl")
 
 
 def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=None):
@@ -53,6 +56,8 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
     """
     out = {}
     def report(msg):
+        if msg:
+            log.info(msg)
         if on_progress:
             on_progress(msg)
         else:
@@ -152,7 +157,7 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
 
         # download
         def pct_hook(p):
-            event({"type": "pct", "pct": p})
+            event({"type": "pct", "pos": pos, "pct": p})
 
         flac = deemix_download(dz, dz_url, settings, out_dir, label,
                                on_progress=on_progress, on_pct=pct_hook if on_event else None)

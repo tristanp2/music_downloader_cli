@@ -30,8 +30,10 @@ import threading
 import uuid
 import atexit
 import json
+import asyncio
 import traceback
 from pathlib import Path
+from collections import defaultdict
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -42,6 +44,8 @@ from core.deezer import init_deezer
 from core.downloader import run_playlist
 from core.registry import list_playlists
 from core import server_lock
+from core import log
+from core import attach_uvicorn_loggers
 
 REPO = Path(__file__).resolve().parent
 if str(REPO) not in sys.path:
@@ -56,7 +60,8 @@ try:
     import deemix.settings as _dms
     SETTINGS = _dms.load(REPO / "config")
 except Exception as _e:
-    print(f"[warn] could not load deemix settings: {_e}")
+    from core import log as _log
+    _log.warning("could not load deemix settings: %s", _e)
     SETTINGS = {}
 
 WORK_DIR_BASE = resolve_output_dir()
@@ -84,6 +89,28 @@ DZ = None          # the one Deezer session, set in startup()
 DZ_LOCK = threading.Lock()   # serialize Deezer calls (session not thread-safe)
 JOBS = {}          # job_id -> job dict
 JOBS_LOCK = threading.Lock()
+
+# SSE event subscribers: job_id -> list[asyncio.Queue]
+EVENT_SUBS = {}
+EVENT_SUBS_LOCK = threading.Lock()
+EVENT_LOOP = None   # set in startup() -- uvicorn's running loop
+
+
+def _push_event(job_id, event):
+    """Thread-safe: push an event dict to all SSE subscribers for this job.
+
+    Uses the globally-stored EVENT_LOOP (captured at startup) rather than
+    trying to resolve the loop dynamically, which fails in background threads
+    on Python 3.10+.
+    """
+    global EVENT_LOOP
+    loop = EVENT_LOOP
+    if loop is None:
+        return  # server not fully started yet, or loop wasn't captured
+    with EVENT_SUBS_LOCK:
+        queues = list(EVENT_SUBS.get(job_id, []))
+    for q in queues:
+        asyncio.run_coroutine_threadsafe(q.put(dict(event)), loop)
 
 PORT = int(os.environ.get("MUSICDL_PORT", "8000"))
 
@@ -127,6 +154,7 @@ def _run_job(job_id, url, user):
         def on_progress(msg):
             lines.append(msg)
         def on_event(e):
+            _push_event(job_id, e)
             t = e.get("type")
             if t == "tracks":
                 job["progress"]["total"] = e["total"]
@@ -152,13 +180,20 @@ def _run_job(job_id, url, user):
                                   on_progress=on_progress, on_event=on_event)
         except Exception as e:
             tb = traceback.format_exc()
-            lines.append(f"[error] run_playlist raised: {e}")
+            log.error("run_playlist raised: %s", e)
             for line in tb.strip().split("\n"):
-                lines.append(f"[error]   {line}")
+                log.error("  %s", line)
             result = {"ok": False, "error": f"run_playlist raised: {e}", "traceback": tb}
     job["result"] = result
     job["status"] = "done" if result.get("ok") else "error"
     job["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    # Signal SSE subscribers that the job is finished.
+    # Convert Path to str so the event is JSON-serializable.
+    result_copy = dict(result)
+    if "folder" in result_copy:
+        result_copy["folder"] = str(result_copy["folder"])
+    _push_event(job_id, {"type": "job_done", "status": job["status"],
+                         "result": result_copy})
 
 
 def _authenticate(request: Request):
@@ -176,17 +211,21 @@ def _authenticate(request: Request):
 
 @app.on_event("startup")
 def _startup():
-    global DZ
+    global DZ, EVENT_LOOP
+    EVENT_LOOP = asyncio.get_running_loop()
+
+    attach_uvicorn_loggers()
+
     if not ARL.is_file():
-        print("[startup] deezer.arl missing -- /download will 503 until added")
+        log.info("[startup] deezer.arl missing -- /download will 503 until added")
         return
     arl_text = ARL.read_text(encoding="utf-8").strip()
     sync_deezer_arl()
     try:
         DZ = init_deezer(arl_text)
-        print("[startup] Deezer session established")
+        log.info("[startup] Deezer session established")
     except Exception as e:
-        print(f"[startup] Deezer login failed: {e}")
+        log.warning("[startup] Deezer login failed: %s", e)
     server_lock.write_lock(PORT)
 
 
@@ -244,8 +283,6 @@ def jobs(request: Request):
         "id": j["id"], "url": j["url"], "user": j.get("user"),
         "status": j["status"],
         "started_at": j["started_at"], "finished_at": j["finished_at"],
-        "log": j["log"][-200:], "result": j["result"],
-        "progress": j.get("progress"),
     } for j in items]}
 
 
@@ -261,6 +298,35 @@ def job_status(job_id: str):
         "log": j["log"][-200:], "result": j["result"],
         "progress": j.get("progress"),
     }
+
+
+@app.get("/jobs/{job_id}/events")
+async def job_events(job_id: str):
+    """SSE stream: pushes download progress events to the browser in real time."""
+    with JOBS_LOCK:
+        if job_id not in JOBS:
+            raise HTTPException(status_code=404, detail="no such job")
+
+    queue = asyncio.Queue()
+    with EVENT_SUBS_LOCK:
+        EVENT_SUBS.setdefault(job_id, []).append(queue)
+
+    async def event_stream():
+        try:
+            while True:
+                evt = await queue.get()
+                if evt is None:
+                    return
+                yield f"event: {evt['type']}\ndata: {json.dumps(evt)}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            with EVENT_SUBS_LOCK:
+                subs = EVENT_SUBS.get(job_id, [])
+                if queue in subs:
+                    subs.remove(queue)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/users")

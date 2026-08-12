@@ -545,6 +545,108 @@ async function refreshJobs() {
   } catch {}
 }
 
+/* ---- SSE: real-time job progress ---- */
+const activeSSE = {};
+
+function watchJob(jobId) {
+  if (activeSSE[jobId]) return; // already watching
+  const es = new EventSource("/jobs/" + encodeURIComponent(jobId) + "/events");
+  activeSSE[jobId] = es;
+
+  es.addEventListener("tracks", function(e) {
+    var d = JSON.parse(e.data);
+    var ctx = knownJobs[jobId];
+    if (!ctx) return;
+    ctx.listEl.style.display = "";
+    for (var i = 0; i < d.items.length; i++) {
+      var t = { pos: d.items[i].pos, name: d.items[i].name, status: "pending", pct: 0 };
+      renderTrackRow(ctx.listEl, t, d.total);
+    }
+  });
+
+  es.addEventListener("start", function(e) {
+    var d = JSON.parse(e.data);
+    var ctx = knownJobs[jobId];
+    if (!ctx) return;
+    var row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
+    if (row) {
+      row.querySelector(".track-name").className = "track-name";
+      renderTrackRow(ctx.listEl, { pos: d.pos, name: d.name, status: "downloading", pct: 0 }, ctx.listEl.querySelectorAll(".track-row").length);
+    }
+  });
+
+  es.addEventListener("pct", function(e) {
+    var d = JSON.parse(e.data);
+    var ctx = knownJobs[jobId];
+    if (!ctx) return;
+    var row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
+    if (!row) return;
+    row.querySelector(".track-name").className = "track-name";
+    row.querySelector(".track-name").textContent = row.querySelector(".track-name").textContent;
+    var barFill = row.querySelector(".mini-bar .fill");
+    if (barFill) {
+      barFill.style.width = (d.pct || 0) + "%";
+      barFill.className = "fill";
+    }
+    var barWrap = row.querySelector(".mini-bar");
+    if (barWrap) barWrap.style.display = "";
+    var statusEl = row.querySelector(".track-status");
+    if (statusEl) {
+      statusEl.className = "track-status downloading";
+      statusEl.textContent = icons.downloading;
+    }
+  });
+
+  es.addEventListener("done", function(e) {
+    var d = JSON.parse(e.data);
+    var ctx = knownJobs[jobId];
+    if (!ctx) return;
+    var row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
+    if (!row) return;
+    renderTrackRow(ctx.listEl, { pos: d.pos, status: d.status, pct: d.pct }, ctx.listEl.querySelectorAll(".track-row").length);
+  });
+
+  es.addEventListener("job_done", function(e) {
+    var d = JSON.parse(e.data);
+    // Update the job card summary from the stored job detail
+    fetch("/jobs/" + encodeURIComponent(jobId) + "?user=" + encodeURIComponent(getUser()))
+      .then(function(r) { return r.json(); })
+      .then(function(j) { updateJobCard(j); });
+    // Refresh library list since a new playlist.meta.json was written
+    refreshPlaylists();
+    delete activeSSE[jobId];
+    es.close();
+  });
+
+  es.onerror = function() {
+    // SSE auto-reconnects. After a grace period, check if we still need
+    // this connection or if the job is already finished.
+    setTimeout(function() {
+      if (!activeSSE[jobId]) return;
+      fetch("/jobs/" + encodeURIComponent(jobId) + "?user=" + encodeURIComponent(getUser()))
+        .then(function(r) {
+          if (!r.ok) throw new Error("gone");
+          return r.json();
+        })
+        .then(function(j) {
+          if (j.status !== "running") {
+            // Job finished (or error) while we were disconnected -- fetch final state
+            updateJobCard(j);
+            refreshPlaylists();
+            delete activeSSE[jobId];
+            es.close();
+          }
+          // else: still running, let SSE reconnect on its own
+        })
+        .catch(function() {
+          // Job gone (server restarted) or network dead -- clean up
+          delete activeSSE[jobId];
+          es.close();
+        });
+    }, 3000);
+  };
+}
+
 async function refreshPlaylists() {
   try {
     const r = await fetch("/playlists?user=" + encodeURIComponent(getUser()));
@@ -689,6 +791,11 @@ $("#go").addEventListener("click", async () => {
     const r = await postDownload(url);
     $("#msg").textContent = "job " + r.job_id + " started";
     $("#url").value = "";
+    // Ensure the job card exists, then open SSE for live progress
+    var ctx = ensureJobCard({ id: r.job_id, url: url, user: getUser(), status: "running" });
+    ctx.metaEl.innerHTML = '<span class="badge running">running</span> &nbsp; ' + esc(url);
+    watchJob(r.job_id);
+    // One-time fetch of the list view (lightweight)
     refreshJobs();
   } catch (e) {
     $("#msg").textContent = "error: " + e.message;
@@ -701,7 +808,6 @@ async function tick() {
   await refreshPlaylists();
 }
 tick();
-setInterval(tick, 5000);
 </script>
 </body>
 </html>
