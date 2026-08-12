@@ -112,7 +112,7 @@ class ProgressListener:
     to a new 10% bucket, so a long download doesn't flood the log.
     """
 
-    BUCKET_SIZE = 25
+    BUCKET_SIZE = 10
 
     def __init__(self, progress=None, task_id=None, label="", on_progress=None):
         self.progress = progress
@@ -137,7 +137,6 @@ class ProgressListener:
                     self._on_pct(rounded_pct)
                 if self.on_progress is not None:
                     msg = f"    {self.label} [{rounded_pct}%]"
-                    log.info(msg)
                     self.on_progress(msg)
                 if self.progress is not None:
                     self.progress.update(self.task_id, completed=int(pct))
