@@ -18,29 +18,15 @@ def _normalize(s):
     return re.sub(r'[^a-z0-9]+', '', (s or "").lower())
 
 
-def _strip_position_prefix(stem):
-    """Remove ALL leading 'NN - ' position prefixes, returning the core name.
-
-    '05 - 13 - Eddie C - X' -> 'Eddie C - X'
-    '13 - Eddie C - X'      -> 'Eddie C - X'
-    'Eddie C - X'           -> 'Eddie C - X'
-    """
-    prev = None
-    cur = stem.strip()
-    while cur != prev:
-        prev = cur
-        cur = re.sub(r'^\d+\s*-\s+', '', cur).strip()
-    return cur
-
-
 def _core_artist_title(stem):
-    """From a filename stem, return (artist, title) by splitting on ' - '
-    after stripping any leading position prefix."""
-    core = _strip_position_prefix(stem)
-    if " - " in core:
-        artist, _, title = core.partition(" - ")
+    """From a filename stem, return (artist, title) by splitting on ' - '.
+
+    Filenames are bare (no position prefix), e.g. 'Eddie C - X'.
+    """
+    if " - " in stem:
+        artist, _, title = stem.partition(" - ")
         return artist.strip(), title.strip()
-    return "", core
+    return "", stem
 
 
 def _is_complete_flac(path):
@@ -131,16 +117,16 @@ def find_partial_track(out_dir, artists, title):
 # ---------------------------------------------------------------------------
 
 def tag_and_rename(flac_path, position, total):
-    """Rename <name>.flac -> 'NN - <name>.flac' and set the Vorbis TRACKNUMBER
-    comment to the Spotify playlist position (NN). FLAC uses Vorbis comments,
-    NOT the ID3 'TRCK' key -- Windows Explorer's '#' column and the Denon Prime
-    4 both read TRACKNUMBER, so we write that.
+    """Set the Vorbis TRACKNUMBER comment to the Spotify playlist position
+    (NN) and ensure the filename is the bare core name.
 
-    Idempotent: strips any existing leading 'NN - ' first, so re-runs never
-    produce a doubled prefix like '05 - 13 - Eddie C - X'.
+    FLAC uses Vorbis comments, NOT the ID3 'TRCK' key -- Windows Explorer's
+    '#' column and the Denon Prime 4 both read TRACKNUMBER, so we write that
+    for playlist ordering. The position is carried in the tag, not the
+    filename, so the on-disk name stays clean (e.g. 'Eddie C - X.flac').
     """
-    core = _strip_position_prefix(flac_path.stem)
-    target_name = f"{position:0{len(str(total))}d} - {core}.flac"
+    core = flac_path.stem
+    target_name = f"{core}.flac"
     # already correctly named? just ensure the tag is right
     if flac_path.name == target_name:
         try:
@@ -154,8 +140,8 @@ def tag_and_rename(flac_path, position, total):
     # If a correctly-named file already exists, the track is already present
     # and the freshly downloaded flac_path is a redundant duplicate (e.g. a
     # re-run the skip-check missed because Spotify and Deezer label the track
-    # slightly differently). Delete the duplicate so we never leave an
-    # unprefixed orphan in the folder, and keep the existing prefixed truth.
+    # slightly differently). Delete the duplicate so we never leave an orphan
+    # in the folder, and keep the existing truth.
     if new_path.exists() and new_path != flac_path:
         try:
             flac_path.unlink()

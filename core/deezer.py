@@ -178,7 +178,7 @@ def deemix_download(dz, deezer_url, settings, out_dir, label, on_progress=None, 
     alone is fragile when out_dir already contains other .flac files -- the
     pre-existing files can have a newer mtime than the just-finalized download,
     causing us to return the wrong path and leave the real download unrenamed
-    (no position prefix)."""
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     # set the output location + flat layout at runtime (override config.json)
     settings["downloadLocation"] = str(out_dir)
