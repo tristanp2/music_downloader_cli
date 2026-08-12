@@ -808,6 +808,31 @@ async function tick() {
   await refreshPlaylists();
 }
 tick();
+
+/* ---- heartbeat: check server every 10s, reload if it comes back ---- */
+(function heartbeat() {
+  var wasDown = false;
+  setInterval(function() {
+    fetch("/health")
+      .then(function(r) {
+        if (r.ok) {
+          if (wasDown) {
+            wasDown = false;
+            location.reload();
+          }
+        } else {
+          wasDown = true;
+          $("#health").textContent = "degraded";
+          $("#health").className = "bad";
+        }
+      })
+      .catch(function() {
+        wasDown = true;
+        $("#health").textContent = "server down";
+        $("#health").className = "bad";
+      });
+  }, 10000);
+})();
 </script>
 </body>
 </html>
