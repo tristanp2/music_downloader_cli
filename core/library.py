@@ -43,21 +43,85 @@ def _core_artist_title(stem):
     return "", core
 
 
+def _is_complete_flac(path):
+    """Return True only if the file is a valid FLAC whose core metadata
+    (TITLE + ALBUM, the fields Windows Explorer shows in its columns) is
+    actually populated.
+
+    deemix writes a Vorbis-comment block up front, so a partial/interrupted
+    download still parses and may even carry a placeholder tag -- but its
+    TITLE/ALBUM/ARTIST are blank. That is exactly what makes Explorer show
+    empty columns for a half-written file. Requiring real TITLE + ALBUM
+    values is therefore the reliable "is this download finished" signal.
+    """
+    if not path.is_file():
+        return False
+    try:
+        audio = FLAC(str(path))
+        if not audio.tags:
+            return False
+        # Case-insensitive lookup: mutagen stores both uppercase (Vorbis
+        # spec) and lowercase aliases, but be safe about it.
+        def has(field):
+            for key in (field, field.lower(), field.upper()):
+                v = audio.tags.get(key)
+                if v:
+                    return True
+            return False
+        return has("TITLE") and has("ALBUM")
+    except Exception:
+        return False
+
+
+def _title_matches(flac_path, title):
+    """Return True if the on-disk FLAC's TITLE (parsed from the filename) is a
+    fuzzy match for the requested Spotify title. Match rule: normalized Spotify
+    title must be contained in (or contain) the on-disk title. This tolerates
+    Deezer filename suffixes like ' (Original Mix)'. Title-only (not artist):
+    Spotify and Deezer routinely catalog the same track under different artist
+    strings, so matching on artist would cause false negatives.
+    """
+    want = _normalize(title)
+    if not want:
+        return False
+    _, ftitle = _core_artist_title(flac_path.stem)
+    fnt = _normalize(ftitle)
+    return bool(fnt and (want in fnt or fnt in want))
+
+
 def find_existing_track(out_dir, artists, title):
-    """Return an existing FLAC in out_dir whose TITLE matches the given track,
-    or None. Match rule: normalized Spotify title must be contained in (or
-    contain) the on-disk title. This tolerates the fact that Deezer filenames
-    append mix/edition suffixes -- e.g. Spotify 'Adapt 2' vs the file
-    'Adapt 2 (Original Mix)' -- so a strict-equality check would miss it and
-    re-download every time. We match on TITLE ONLY (not artist): Spotify and
-    Deezer routinely catalog the same track under different artist strings."""
-    want_title = _normalize(title)
-    if not want_title:
+    """Return an existing COMPLETE FLAC in out_dir matching the given track,
+    or None.
+
+    A file is considered a match only if it is a valid, fully-tagged FLAC
+    (see _is_complete_flac) -- partial/interrupted downloads are ignored so
+    they get re-fetched instead of being treated as already present.
+    """
+    if not _normalize(title):
         return None
     for f in out_dir.glob("*.flac"):
-        _, ftitle = _core_artist_title(f.stem)
-        fnt = _normalize(ftitle)
-        if fnt and (want_title in fnt or fnt in want_title):
+        if not _is_complete_flac(f):
+            continue
+        if _title_matches(f, title):
+            return f
+    return None
+
+
+def find_partial_track(out_dir, artists, title):
+    """Return a PARTIAL (incomplete) FLAC in out_dir matching the given track,
+    or None.
+
+    Used to clean up interrupted downloads before re-downloading: deemix will
+    see a same-named file on disk and skip the write (treating it as
+    alreadyDownloaded), so the leftover partial must be deleted first or the
+    track is perpetually stuck as 'failed'.
+    """
+    if not _normalize(title):
+        return None
+    for f in out_dir.glob("*.flac"):
+        if _is_complete_flac(f):
+            continue
+        if _title_matches(f, title):
             return f
     return None
 

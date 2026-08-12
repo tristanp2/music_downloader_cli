@@ -26,7 +26,7 @@ import time
 from .config import resolve_output_dir, sync_deezer_arl, read_conf
 from .spotify import safe_folder_name, validate_spotify_url, get_spotify_token, parse_spotify_playlist
 from .deezer import deezer_search, deemix_download
-from .library import find_existing_track, tag_and_rename, write_meta
+from .library import find_existing_track, find_partial_track, tag_and_rename, write_meta
 
 log = logging.getLogger("musicdl")
 
@@ -138,6 +138,19 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
             statuses.append("downloaded")
             skipped += 1
             continue
+
+        # clean up any partial/interrupted leftover for this track BEFORE
+        # downloading. deemix sees a same-named file on disk and treats it as
+        # alreadyDownloaded, so the partial would otherwise block the real
+        # download forever (track stuck as 'failed').
+        partial = find_partial_track(out_dir, t["artists"], t["name"])
+        if partial:
+            report(f"[{pos}/{total}] {display[:60]}")
+            report(f"    [cleanup] removing partial download: {partial.name}")
+            try:
+                partial.unlink()
+            except OSError as e:
+                report(f"    [warn] could not remove partial {partial.name}: {e}")
 
         # search
         report(f"[{pos}/{total}] {display[:60]}")
