@@ -21,7 +21,11 @@ Auth: POST /download requires header X-Auth-Token matching the shared secret
 (localhost LAN use). Set the token or the endpoint stays unauthenticated.
 
 Run:
-  .venv/Scripts/python.exe -m uvicorn app:app --host 0.0.0.0 --port 8000
+  .venv/Scripts/python.exe app.py            # binds via config/settings.conf `bind_host`
+  # BIND_HOST is read from config `bind_host` (or env MUSICDL_BIND_HOST),
+  # defaulting to 0.0.0.0 (all interfaces). Set `bind_host` to your LAN IP to
+  # bind that NIC only, keeping the server off the Tailscale virtual interface.
+  # Optional arg = port (default 8000), or set env MUSICDL_PORT.
 """
 import os
 import sys
@@ -52,7 +56,33 @@ REPO = Path(__file__).resolve().parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-app = FastAPI(title="music-downloader")
+
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app):
+    global DZ, EVENT_LOOP
+    EVENT_LOOP = asyncio.get_running_loop()
+    attach_uvicorn_loggers()
+    if not ARL.is_file():
+        log.info("[startup] deezer.arl missing -- /download will 503 until added")
+    else:
+        arl_text = ARL.read_text(encoding="utf-8").strip()
+        sync_deezer_arl()
+        try:
+            DZ = init_deezer(arl_text)
+            log.info("[startup] Deezer session established")
+        except Exception as e:
+            log.warning("[startup] Deezer login failed: %s", e)
+    server_lock.write_lock(PORT)
+    try:
+        yield
+    finally:
+        server_lock.clear_lock()
+
+
+app = FastAPI(title="music-downloader", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # server-side state (single process)
@@ -114,6 +144,21 @@ def _push_event(job_id, event):
         asyncio.run_coroutine_threadsafe(q.put(dict(event)), loop)
 
 PORT = int(os.environ.get("MUSICDL_PORT", "8000"))
+
+
+def _bind_host():
+    """Interface uvicorn listens on. Precedence: env MUSICDL_BIND_HOST >
+    config/settings.conf `bind_host` > default 0.0.0.0 (all interfaces).
+    Set `bind_host` to your LAN IP to listen only on that NIC, which keeps
+    the server off the Tailscale virtual interface.
+    """
+    env = os.environ.get("MUSICDL_BIND_HOST")
+    if env:
+        return env
+    return read_conf(REPO / "config" / "settings.conf").get("bind_host") or "0.0.0.0"
+
+
+BIND_HOST = _bind_host()
 
 
 def _server_token():
@@ -210,33 +255,8 @@ def _authenticate(request: Request):
 # endpoints
 # ---------------------------------------------------------------------------
 
-@app.on_event("startup")
-def _startup():
-    global DZ, EVENT_LOOP
-    EVENT_LOOP = asyncio.get_running_loop()
-
-    attach_uvicorn_loggers()
-
-    if not ARL.is_file():
-        log.info("[startup] deezer.arl missing -- /download will 503 until added")
-        return
-    arl_text = ARL.read_text(encoding="utf-8").strip()
-    sync_deezer_arl()
-    try:
-        DZ = init_deezer(arl_text)
-        log.info("[startup] Deezer session established")
-    except Exception as e:
-        log.warning("[startup] Deezer login failed: %s", e)
-    server_lock.write_lock(PORT)
-
-
-@app.on_event("shutdown")
-def _shutdown():
-    server_lock.clear_lock()
-
-
 # Belt-and-suspenders: clear the lock even on a hard Ctrl-C / process exit,
-# not only on the graceful FastAPI shutdown event.
+# not only on graceful shutdown (handled by the lifespan `finally`).
 atexit.register(server_lock.clear_lock)
 
 
@@ -449,4 +469,4 @@ def reload(request: Request, payload: dict = None):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    uvicorn.run(app, host=BIND_HOST, port=PORT)

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# run_server.sh - launch the music-downloader webserver (uvicorn app:app).
+# run_server.sh - launch the music-downloader webserver (app.py).
 # Portable across Linux, WSL2, and Windows git-bash. Optional $1 = port
-# (default 8000). Binds 0.0.0.0 so other LAN machines can reach it - protect
-# with X-Auth-Token (set env MUSICDL_SERVER_TOKEN or config/settings.conf).
+# (default 8000). The bind interface is read from config/settings.conf
+# `bind_host` (or env MUSICDL_BIND_HOST) inside app.py, not hardcoded here.
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$DIR/.venv/Scripts/python.exe" ]; then
@@ -19,6 +19,6 @@ if [ ! -x "$VENV_PY" ]; then
     exit 1
 fi
 PORT="${1:-8000}"
-export MUSIC_DOWNLOADER_PORT="$PORT"
-echo "[music_downloader] starting webserver on http://0.0.0.0:${PORT}  (Ctrl-C to stop)"
-exec "$VENV_PY" -m uvicorn app:app --host 0.0.0.0 --port "$PORT"
+export MUSICDL_PORT="$PORT"
+echo "[music_downloader] starting webserver (port $PORT, bind host from config/settings.conf bind_host)  (Ctrl-C to stop)"
+exec "$VENV_PY" app.py

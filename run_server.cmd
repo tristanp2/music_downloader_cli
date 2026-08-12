@@ -1,8 +1,9 @@
 @echo off
 rem run_server.cmd - launch the music-downloader webserver on Windows.
-rem Resolves its own directory, uses the project venv, and starts uvicorn
-rem serving app:app. Optional first arg = port (default 8000). Binds 0.0.0.0
-rem so other machines on the LAN can reach it - protect with X-Auth-Token.
+rem Resolves its own directory, uses the project venv, and starts app.py.
+rem Optional first arg = port (default 8000). The bind interface is read from
+rem config/settings.conf `bind_host` (or env MUSICDL_BIND_HOST) inside app.py,
+rem not hardcoded here - so LAN-only vs all-interfaces is controlled by config.
 rem Requires the venv to exist:
 rem   python -m venv .venv
 rem   .venv\Scripts\activate
@@ -22,7 +23,7 @@ if not exist "%VENV_PY%" (
 
 set "PORT=%~1"
 if "%PORT%"=="" set "PORT=8000"
-set "MUSIC_DOWNLOADER_PORT=%PORT%"
+set "MUSICDL_PORT=%PORT%"
 
-echo [music_downloader] starting webserver on http://0.0.0.0:%PORT%  (Ctrl-C to stop)
-"%VENV_PY%" -m uvicorn app:app --host 0.0.0.0 --port %PORT%
+echo [music_downloader] starting webserver (port %PORT%, bind host from config/settings.conf bind_host)  (Ctrl-C to stop)
+"%VENV_PY%" app.py
