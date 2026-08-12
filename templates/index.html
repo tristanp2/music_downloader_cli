@@ -581,8 +581,6 @@ function watchJob(jobId) {
     if (!ctx) return;
     var row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
     if (!row) return;
-    row.querySelector(".track-name").className = "track-name";
-    row.querySelector(".track-name").textContent = row.querySelector(".track-name").textContent;
     var barFill = row.querySelector(".mini-bar .fill");
     if (barFill) {
       barFill.style.width = (d.pct || 0) + "%";
@@ -603,7 +601,9 @@ function watchJob(jobId) {
     if (!ctx) return;
     var row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
     if (!row) return;
-    renderTrackRow(ctx.listEl, { pos: d.pos, status: d.status, pct: d.pct }, ctx.listEl.querySelectorAll(".track-row").length);
+    // Preserve the existing track name so renderTrackRow doesn't blank it.
+    var existingName = row.querySelector(".track-name").textContent;
+    renderTrackRow(ctx.listEl, { pos: d.pos, name: existingName, status: d.status, pct: d.pct }, ctx.listEl.querySelectorAll(".track-row").length);
   });
 
   es.addEventListener("job_done", function(e) {
