@@ -8,6 +8,8 @@ from pathlib import Path
 
 from mutagen.flac import FLAC
 
+from .track import Track
+
 
 # ---------------------------------------------------------------------------
 # skip-if-exists
@@ -182,10 +184,10 @@ def write_meta(out_dir, spotify_url, spotify_id, name, tracks, statuses):
     }
     for t, st in zip(tracks, statuses):
         meta["tracks"].append({
-            "position": t.get("position"),
-            "spotify_uri": t.get("spotify_uri"),
-            "artist": " ".join(t.get("artists", [])),
-            "title": t.get("name"),
+            "position": t.position,
+            "spotify_uri": t.spotify_uri,
+            "artist": " ".join(t.artists),
+            "title": t.name,
             "status": st,
         })
     path = out_dir / "playlist.meta.json"

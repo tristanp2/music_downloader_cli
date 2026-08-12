@@ -19,6 +19,7 @@ SPOTIFY_SCOPE = "playlist-read-private playlist-read-collaborative"
 
 
 from .config import read_conf, CONF_SETTINGS, SPOTIFY_TOKEN_CACHE, SPOTIFY_REDIRECT, die
+from .track import Track
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +210,7 @@ def parse_spotify_playlist(token, playlist_id):
 
     pl = _spotify_api_get(token, f"https://api.spotify.com/v1/playlists/{playlist_id}")
     name = pl.get("name", playlist_id)
-    tracks = []
+    tracks: list[Track] = []
     position = 0
     page = extract_container(pl)
     while isinstance(page, dict):
@@ -223,12 +224,12 @@ def parse_spotify_playlist(token, playlist_id):
             arts = [(a.get("name") or "").strip() for a in t.get("artists", [])]
             if tn:
                 position += 1
-                tracks.append({
-                    "name": tn,
-                    "artists": arts,
-                    "position": position,
-                    "spotify_uri": t.get("spotify_uri"),
-                })
+                tracks.append(Track(
+                    position=position,
+                    name=tn,
+                    artists=arts,
+                    spotify_uri=t.get("spotify_uri"),
+                ))
         url = page.get("next")
         if not url:
             break

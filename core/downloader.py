@@ -27,6 +27,7 @@ from .config import resolve_output_dir, sync_deezer_arl, read_conf
 from .spotify import safe_folder_name, validate_spotify_url, get_spotify_token, parse_spotify_playlist
 from .deezer import deezer_search, deemix_download
 from .library import find_existing_track, find_partial_track, tag_and_rename, write_meta
+from .track import Track
 
 log = logging.getLogger("musicdl")
 
@@ -111,7 +112,7 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
         "type": "tracks",
         "total": total,
         "items": [
-            {"pos": t["position"], "name": f"{' - '.join(t['artists'])} - {t['name']}" if t["artists"] else t["name"]}
+            {"pos": t.position, "name": f"{' - '.join(t.artists)} - {t.name}" if t.artists else t.name}
             for t in tracks
         ],
     })
@@ -126,19 +127,19 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
     statuses = []
 
     for i, t in enumerate(tracks, 1):
-        q = f"{' '.join(t['artists'])} {t['name']}"
-        artist_part = " - ".join(t["artists"])
+        q = f"{' '.join(t.artists)} {t.name}"
+        artist_part = " - ".join(t.artists)
         if artist_part:
-            display = f"{artist_part} - {t['name']}"
+            display = f"{artist_part} - {t.name}"
         else:
-            display = t["name"]
-        pos = t["position"]
+            display = t.name
+        pos = t.position
         label = f"[{pos}/{total}] {display[:60]}"
 
         event({"type": "start", "pos": pos, "name": display[:60]})
 
         # check skip
-        existing = find_existing_track(out_dir, t["artists"], t["name"])
+        existing = find_existing_track(out_dir, t.artists, t.name)
         if existing:
             report(f"[{pos}/{total}] {display[:60]}")
             report(f"    [skip] already present: {existing.name}")
@@ -151,7 +152,7 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
         # downloading. deemix sees a same-named file on disk and treats it as
         # alreadyDownloaded, so the partial would otherwise block the real
         # download forever (track stuck as 'failed').
-        partial = find_partial_track(out_dir, t["artists"], t["name"])
+        partial = find_partial_track(out_dir, t.artists, t.name)
         if partial:
             report(f"[{pos}/{total}] {display[:60]}")
             report(f"    [cleanup] removing partial download: {partial.name}")
@@ -162,16 +163,16 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
 
         # search
         report(f"[{pos}/{total}] {display[:60]}")
-        hit = deezer_search(dz, q, target_title=t["name"], target_artists=t["artists"])
+        hit = deezer_search(dz, q, target_title=t.name, target_artists=t.artists)
         if not hit:
             report("    [deezer] no match")
             event({"type": "done", "pos": pos, "status": "missed", "pct": 0})
-            missed.append({"name": t["name"], "artists": t["artists"]})
+            missed.append({"name": t.name, "artists": t.artists})
             statuses.append("missed")
             continue
         dz_url = hit.get("link")
         if not dz_url:
-            missed.append({"name": t["name"], "artists": t["artists"]})
+            missed.append({"name": t.name, "artists": t.artists})
             event({"type": "done", "pos": pos, "status": "missed", "pct": 0})
             statuses.append("missed")
             continue
@@ -191,7 +192,7 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
         else:
             report("    [deezer] download failed")
             event({"type": "done", "pos": pos, "status": "failed", "pct": 0})
-            missed.append({"name": t["name"], "artists": t["artists"]})
+            missed.append({"name": t.name, "artists": t.artists})
             statuses.append("missed")
             failed += 1
 
