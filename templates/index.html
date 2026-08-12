@@ -268,6 +268,34 @@
 
   .update-link, .zip-link { color: var(--text-b); text-decoration: none; border-bottom: 1px dotted var(--border-h); }
   .update-link:hover, .zip-link:hover { color: #fff; }
+
+  /* full-screen "server down" overlay: dims content below the top bar + blocks clicks */
+  .server-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.72);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 40;
+  }
+  .server-overlay.show { display: flex; }
+  .server-overlay .sad {
+    font-family: var(--mono);
+    font-size: 72px;
+    color: var(--text-b);
+    letter-spacing: 4px;
+    user-select: none;
+  }
+  .server-overlay .sub {
+    position: absolute;
+    bottom: 12%;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-d);
+  }
+  /* keep the top bar above the overlay so it stays visible + interactive */
+  header { position: relative; z-index: 60; }
 </style>
 </head>
 <body>
@@ -842,30 +870,44 @@ async function tick() {
 }
 tick();
 
-/* ---- heartbeat: check server every 10s, reload if it comes back ---- */
+/* ---- heartbeat: check server every 10s, show overlay when down, reload on recovery ---- */
 (function heartbeat() {
   var wasDown = false;
+  function showOverlay(on) {
+    var ov = document.getElementById("serverOverlay");
+    if (ov) ov.classList.toggle("show", on);
+    // disable the user dropdown while disconnected so no requests are sent
+    var sel = document.getElementById("user-select");
+    if (sel) sel.disabled = on;
+  }
   setInterval(function() {
     fetch("/health")
       .then(function(r) {
         if (r.ok) {
           if (wasDown) {
             wasDown = false;
+            showOverlay(false);
             location.reload();
           }
         } else {
           wasDown = true;
+          showOverlay(true);
           $("#health").textContent = "degraded";
           $("#health").className = "bad";
         }
       })
       .catch(function() {
         wasDown = true;
+        showOverlay(true);
         $("#health").textContent = "server down";
         $("#health").className = "bad";
       });
   }, 10000);
 })();
 </script>
+<div id="serverOverlay" class="server-overlay">
+  <div class="sad">:(</div>
+  <div class="sub">server down &mdash; reconnecting...</div>
+</div>
 </body>
 </html>
