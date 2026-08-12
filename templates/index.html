@@ -253,6 +253,9 @@
   .lt-status.missed     { color: var(--warn); }
   .lt-status.skipped    { color: var(--text-b); }
   .lt-status.failed     { color: var(--err); }
+  .lib-track .lt-dl-cell { min-width: 22px; text-align: center; }
+  .lt-dl { color: var(--text-b); text-decoration: none; border-bottom: 1px dotted var(--border-h); }
+  .lt-dl:hover { color: #fff; }
 
   .lt-chevron { min-width: 16px; text-align: center; color: var(--text-d); font-size: 11px; transition: transform 0.25s ease; }
   .lt-chevron.open { transform: rotate(90deg); color: var(--text-b); }
@@ -778,10 +781,16 @@ window.toggleLib = async function(row) {
   const tracks = libCache[folder];
   ctx.inner.innerHTML = tracks.map(function(t) {
     var name = t.artist ? t.artist + " - " + t.title : t.title;
+    var dl = t.has_file
+      ? '<a class="lt-dl" href="/library/' + encodeURIComponent(folder) +
+        '/track/' + encodeURIComponent(t.position) + '?user=' + encodeURIComponent(getUser()) +
+        '">dl</a>'
+      : '';
     return '<div class="lib-track">' +
       '<span class="lt-pos">' + t.position + '</span>' +
       '<span class="lt-name">' + esc(name) + '</span>' +
       '<span class="lt-status ' + t.status + '">' + (libIcons[t.status] || "") + '</span>' +
+      '<span class="lt-dl-cell">' + dl + '</span>' +
     '</div>';
   }).join("");
 

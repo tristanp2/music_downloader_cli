@@ -36,13 +36,14 @@ from pathlib import Path
 from collections import defaultdict
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.config import resolve_output_dir, sync_deezer_arl, ARL, read_conf, read_users
 from core.deezer import init_deezer
 from core.downloader import run_playlist
 from core.registry import list_playlists
+from core.library import find_existing_track
 from core import server_lock
 from core import log
 from core import attach_uvicorn_loggers
@@ -365,19 +366,42 @@ def library_folder(request: Request, folder: str):
         raise HTTPException(status_code=404, detail="playlist.meta.json not found")
     data = json.loads(meta.read_text(encoding="utf-8"))
     tracks = data.get("tracks", []) or []
-    # attach filename if it exists on disk
+    # attach the on-disk filename (if present) using the same title-match the
+    # downloader uses -- robust to the bare naming + Deezer suffixes.
     for t in tracks:
-        nn = f"{t['position']:02d}"
-        t["has_file"] = any(
-            f.name.startswith(nn) and f.name.endswith(".flac")
-            for f in fp.glob("*.flac")
-        ) if t.get("status") == "downloaded" else False
+        flac = find_existing_track(fp, t.get("artist", "").split(), t.get("title", "")) \
+            if t.get("status") == "downloaded" else None
+        t["has_file"] = flac is not None
+        t["filename"] = flac.name if flac else None
     return {
         "folder": folder,
         "name": data.get("name", folder),
         "spotify_url": data.get("spotify_url"),
         "tracks": tracks,
     }
+
+
+@app.get("/library/{folder}/track/{position}")
+def library_track_file(request: Request, folder: str, position: int):
+    """Serve a single FLAC from a playlist folder by its Spotify position."""
+    user = _require_user(request)
+    fp = _resolve_user_path(user, folder)
+    meta = fp / "playlist.meta.json"
+    if not meta.is_file():
+        raise HTTPException(status_code=404, detail="playlist.meta.json not found")
+    data = json.loads(meta.read_text(encoding="utf-8"))
+    tracks = data.get("tracks", []) or []
+    t = next((x for x in tracks if x.get("position") == position), None)
+    if not t:
+        raise HTTPException(status_code=404, detail="no such track position")
+    flac = find_existing_track(fp, t.get("artist", "").split(), t.get("title", ""))
+    if not flac or not flac.is_file():
+        raise HTTPException(status_code=404, detail="track file not found on disk")
+    return FileResponse(
+        str(flac),
+        media_type="audio/flac",
+        filename=flac.name,
+    )
 
 
 @app.get("/zip/{folder}")
