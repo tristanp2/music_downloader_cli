@@ -38,6 +38,7 @@ import asyncio
 import traceback
 from pathlib import Path
 from collections import defaultdict
+from dataclasses import asdict
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
@@ -51,6 +52,7 @@ from core.library import find_existing_track
 from core import server_lock
 from core import log
 from core import attach_uvicorn_loggers
+from core.job import Job, JobProgress, TrackState
 
 REPO = Path(__file__).resolve().parent
 if str(REPO) not in sys.path:
@@ -118,7 +120,7 @@ def _resolve_user_path(user: str, folder: str) -> Path:
 
 DZ = None          # the one Deezer session, set in startup()
 DZ_LOCK = threading.Lock()   # serialize Deezer calls (session not thread-safe)
-JOBS = {}          # job_id -> job dict
+JOBS = {}          # job_id -> Job
 JOBS_LOCK = threading.Lock()
 
 # SSE event subscribers: job_id -> list[asyncio.Queue]
@@ -191,9 +193,8 @@ def _run_job(job_id, url, user):
     """Background thread: run the playlist and stream progress into the job."""
     global DZ
     job = JOBS[job_id]
-    job["progress"] = {"total": None, "tracks": {}}
-    lines = job["log"]
-    tracks = job["progress"]["tracks"]
+    lines = job.log
+    tracks = job.progress.tracks
     work_dir = WORK_DIR_BASE / user
     work_dir.mkdir(parents=True, exist_ok=True)
     with DZ_LOCK:
@@ -203,24 +204,25 @@ def _run_job(job_id, url, user):
             _push_event(job_id, e)
             t = e.get("type")
             if t == "tracks":
-                job["progress"]["total"] = e["total"]
+                job.progress.total = e["total"]
                 for item in e["items"]:
-                    tracks[item["pos"]] = {
-                        "pos": item["pos"], "name": item["name"],
-                        "status": "pending", "pct": 0,
-                    }
+                    tracks[item["pos"]] = TrackState(
+                        pos=item["pos"], name=item["name"],
+                        status="pending", pct=0,
+                    )
             elif t == "start":
                 if e["pos"] in tracks:
-                    tracks[e["pos"]]["status"] = "downloading"
+                    tracks[e["pos"]].status = "downloading"
             elif t == "pct":
                 for p in sorted(tracks.keys(), reverse=True):
-                    if tracks[p]["status"] == "downloading":
-                        tracks[p]["pct"] = e["pct"]
+                    if tracks[p].status == "downloading":
+                        tracks[p].pct = e["pct"]
                         break
             elif t == "done":
                 pos = e["pos"]
                 if pos in tracks:
-                    tracks[pos].update(status=e["status"], pct=e["pct"])
+                    tracks[pos].status = e["status"]
+                    tracks[pos].pct = e["pct"]
         try:
             result = run_playlist(url, DZ, SETTINGS, work_dir=work_dir,
                                   on_progress=on_progress, on_event=on_event)
@@ -230,15 +232,15 @@ def _run_job(job_id, url, user):
             for line in tb.strip().split("\n"):
                 log.error("  %s", line)
             result = {"ok": False, "error": f"run_playlist raised: {e}", "traceback": tb}
-    job["result"] = result
-    job["status"] = "done" if result.get("ok") else "error"
-    job["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    job.result = result
+    job.status = "done" if result.get("ok") else "error"
+    job.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     # Signal SSE subscribers that the job is finished.
     # Convert Path to str so the event is JSON-serializable.
     result_copy = dict(result)
     if "folder" in result_copy:
         result_copy["folder"] = str(result_copy["folder"])
-    _push_event(job_id, {"type": "job_done", "status": job["status"],
+    _push_event(job_id, {"type": "job_done", "status": job.status,
                          "result": result_copy})
 
 
@@ -281,16 +283,12 @@ def download(request: Request, payload: dict):
         raise HTTPException(status_code=503, detail="Deezer session expired -- POST /reload with a fresh ARL")
     job_id = uuid.uuid4().hex[:12]
     with JOBS_LOCK:
-        JOBS[job_id] = {
-            "id": job_id,
-            "url": url,
-            "user": user,
-            "status": "running",
-            "log": [],
-            "result": None,
-            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "finished_at": None,
-        }
+        JOBS[job_id] = Job(
+            id=job_id,
+            url=url,
+            user=user,
+            started_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+        )
     threading.Thread(target=_run_job, args=(job_id, url, user), daemon=True).start()
     return {"job_id": job_id}
 
@@ -299,11 +297,11 @@ def download(request: Request, payload: dict):
 def jobs(request: Request):
     user = _require_user(request)
     with JOBS_LOCK:
-        items = sorted(JOBS.values(), key=lambda j: j["started_at"], reverse=True)
+        items = sorted(JOBS.values(), key=lambda j: j.started_at, reverse=True)
     return {"jobs": [{
-        "id": j["id"], "url": j["url"], "user": j.get("user"),
-        "status": j["status"],
-        "started_at": j["started_at"], "finished_at": j["finished_at"],
+        "id": j.id, "url": j.url, "user": j.user,
+        "status": j.status,
+        "started_at": j.started_at, "finished_at": j.finished_at,
     } for j in items]}
 
 
@@ -314,10 +312,10 @@ def job_status(job_id: str):
     if not j:
         raise HTTPException(status_code=404, detail="no such job")
     return {
-        "id": j["id"], "url": j["url"], "status": j["status"],
-        "started_at": j["started_at"], "finished_at": j["finished_at"],
-        "log": j["log"][-200:], "result": j["result"],
-        "progress": j.get("progress"),
+        "id": j.id, "url": j.url, "status": j.status,
+        "started_at": j.started_at, "finished_at": j.finished_at,
+        "log": j.log[-200:], "result": j.result,
+        "progress": asdict(j.progress),
     }
 
 
@@ -370,7 +368,7 @@ def health():
         content={
             "deezer_session": "ok" if ok else "expired",
             "arl_present": ARL.is_file(),
-            "jobs_running": sum(1 for j in JOBS.values() if j["status"] == "running"),
+            "jobs_running": sum(1 for j in JOBS.values() if j.status == "running"),
         },
     )
 
