@@ -28,6 +28,7 @@ from .spotify import safe_folder_name, validate_spotify_url, get_spotify_token, 
 from .deezer import deezer_search, deemix_download
 from .library import find_existing_track, find_partial_track, tag_and_rename, write_meta
 from .track import Track
+from .event_types import JobEventType, DownloadStatus
 
 log = logging.getLogger("musicdl")
 
@@ -109,7 +110,7 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
 
     # emit full track list upfront so the UI can render all rows immediately
     event({
-        "type": "tracks",
+        "type": JobEventType.TRACKS,
         "total": total,
         "items": [
             {"pos": t.position, "name": f"{' - '.join(t.artists)} - {t.name}" if t.artists else t.name}
@@ -136,18 +137,17 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
         pos = t.position
         label = f"[{pos}/{total}] {display[:60]}"
 
-        event({"type": "start", "pos": pos, "name": display[:60]})
+        event({"type": JobEventType.START, "pos": pos, "name": display[:60]})
 
         # check skip
         existing = find_existing_track(out_dir, t.artists, t.name)
         if existing:
             report(f"[{pos}/{total}] {display[:60]}")
             report(f"    [skip] already present: {existing.name}")
-            event({"type": "done", "pos": pos, "status": "skipped", "pct": 100})
+            event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.SKIPPED, "pct": 100})
             statuses.append("downloaded")
             skipped += 1
             continue
-
         # clean up any partial/interrupted leftover for this track BEFORE
         # downloading. deemix sees a same-named file on disk and treats it as
         # alreadyDownloaded, so the partial would otherwise block the real
@@ -166,32 +166,32 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
         hit = deezer_search(dz, q, target_title=t.name, target_artists=t.artists)
         if not hit:
             report("    [deezer] no match")
-            event({"type": "done", "pos": pos, "status": "missed", "pct": 0})
+            event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.MISSED, "pct": 0})
             missed.append({"name": t.name, "artists": t.artists})
             statuses.append("missed")
             continue
         dz_url = hit.get("link")
         if not dz_url:
             missed.append({"name": t.name, "artists": t.artists})
-            event({"type": "done", "pos": pos, "status": "missed", "pct": 0})
+            event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.MISSED, "pct": 0})
             statuses.append("missed")
             continue
 
         # download
         def pct_hook(p):
-            event({"type": "pct", "pos": pos, "pct": p})
+            event({"type": JobEventType.PCT, "pos": pos, "pct": p})
 
         flac = deemix_download(dz, dz_url, settings, out_dir, label,
                                on_progress=on_progress, on_pct=pct_hook if on_event else None)
         if flac:
             final = tag_and_rename(flac, pos, total)
             report(f"    [deezer] FLAC downloaded -> {final.name}")
-            event({"type": "done", "pos": pos, "status": "downloaded", "pct": 100})
+            event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.DOWNLOADED, "pct": 100})
             statuses.append("downloaded")
             downloaded += 1
         else:
             report("    [deezer] download failed")
-            event({"type": "done", "pos": pos, "status": "failed", "pct": 0})
+            event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.FAILED, "pct": 0})
             missed.append({"name": t.name, "artists": t.artists})
             statuses.append("missed")
             failed += 1

@@ -53,6 +53,7 @@ from core import server_lock
 from core import log
 from core import attach_uvicorn_loggers
 from core.job import Job, JobProgress, TrackState
+from core.event_types import JobEventType, DownloadStatus
 
 REPO = Path(__file__).resolve().parent
 if str(REPO) not in sys.path:
@@ -203,22 +204,22 @@ def _run_job(job_id, url, user):
         def on_event(e):
             _push_event(job_id, e)
             t = e.get("type")
-            if t == "tracks":
+            if t == JobEventType.TRACKS:
                 job.progress.total = e["total"]
                 for item in e["items"]:
                     tracks[item["pos"]] = TrackState(
                         pos=item["pos"], name=item["name"],
-                        status="pending", pct=0,
+                        status=DownloadStatus.PENDING, pct=0,
                     )
-            elif t == "start":
+            elif t == JobEventType.START:
                 if e["pos"] in tracks:
-                    tracks[e["pos"]].status = "downloading"
-            elif t == "pct":
+                    tracks[e["pos"]].status = DownloadStatus.DOWNLOADING
+            elif t == JobEventType.PCT:
                 for p in sorted(tracks.keys(), reverse=True):
-                    if tracks[p].status == "downloading":
+                    if tracks[p].status == DownloadStatus.DOWNLOADING:
                         tracks[p].pct = e["pct"]
                         break
-            elif t == "done":
+            elif t == JobEventType.DONE:
                 pos = e["pos"]
                 if pos in tracks:
                     tracks[pos].status = e["status"]
@@ -233,14 +234,14 @@ def _run_job(job_id, url, user):
                 log.error("  %s", line)
             result = {"ok": False, "error": f"run_playlist raised: {e}", "traceback": tb}
     job.result = result
-    job.status = "done" if result.get("ok") else "error"
+    job.status = DownloadStatus.OK if result.get("ok") else DownloadStatus.ERROR
     job.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     # Signal SSE subscribers that the job is finished.
     # Convert Path to str so the event is JSON-serializable.
     result_copy = dict(result)
     if "folder" in result_copy:
         result_copy["folder"] = str(result_copy["folder"])
-    _push_event(job_id, {"type": "job_done", "status": job.status,
+    _push_event(job_id, {"type": JobEventType.JOB_DONE, "status": job.status,
                          "result": result_copy})
 
 
@@ -336,7 +337,7 @@ async def job_events(job_id: str):
                 evt = await queue.get()
                 if evt is None:
                     return
-                yield f"event: {evt['type']}\ndata: {json.dumps(evt)}\n\n"
+                yield f"event: {evt['type'].value}\ndata: {json.dumps(evt)}\n\n"
         except asyncio.CancelledError:
             pass
         finally:
