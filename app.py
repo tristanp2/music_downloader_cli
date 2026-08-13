@@ -525,7 +525,15 @@ async def job_feed_stream(request: Request):
             while True:
                 if await request.is_disconnected():
                     break
-                evt = await queue.get()
+                try:
+                    evt = await asyncio.wait_for(queue.get(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    # Wake periodically so a client disconnect (e.g. Ctrl-C)
+                    # is noticed without waiting for the next pushed event.
+                    # uvicorn closes the connection BEFORE running the lifespan
+                    # shutdown, so we must detect the disconnect ourselves to
+                    # exit cleanly instead of hanging on queue.get().
+                    continue
                 if evt is None:
                     return
                 yield f"event: {evt['type'].value}\ndata: {json.dumps(evt)}\n\n"
@@ -567,7 +575,15 @@ async def job_events(job_id: str):
     async def event_stream():
         try:
             while True:
-                evt = await queue.get()
+                try:
+                    evt = await asyncio.wait_for(queue.get(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    # Same as the shared feed: uvicorn closes the connection
+                    # before the lifespan shutdown runs, so wake up periodically
+                    # and break if the client went away (Ctrl-C / tab close).
+                    if await request.is_disconnected():
+                        break
+                    continue
                 if evt is None:
                     return
                 yield f"event: {evt['type'].value}\ndata: {json.dumps(evt)}\n\n"
@@ -701,4 +717,11 @@ def reload(request: Request, payload: dict = None):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=BIND_HOST, port=PORT)
+    # Lower the graceful-shutdown timeout. On Ctrl-C uvicorn waits for in-flight
+    # SSE connections to finish BEFORE running the lifespan shutdown -- and an
+    # open SSE stream never "finishes" on its own. With the default 30s timeout
+    # the server hangs waiting for those connections (the "Waiting for
+    # connections to close" message). The SSE generators self-detect a dropped
+    # client (see the wake-on-timeout loop in event_stream), so a short grace
+    # window is enough: one Ctrl-C ends the server in ~2s, no second Ctrl-C.
+    uvicorn.run(app, host=BIND_HOST, port=PORT, timeout_graceful_shutdown=3)
