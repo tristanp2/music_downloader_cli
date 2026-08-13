@@ -44,6 +44,56 @@ def _title_similarity(a, b):
     return len(ta & tb) / len(ta | tb)
 
 
+# Edition/version noise words that DJ/electronic releases tack onto a title
+# (e.g. "Original Mix", "Extended Mix", "Radio Edit", "Remastered"). These are
+# NOT part of the song identity -- Deezer and Spotify routinely disagree on
+# which suffix a given track carries, so matching on them produces false
+# misses. Stripped from BOTH sides before scoring. Deliberately excludes
+# "remix" (a remix is a different recording, not just a labelled edition).
+_EDITION_SUFFIXES = (
+    "original mix", "extended mix", "club mix", "vocal mix", "radio mix",
+    "extended", "radio edit", "radio", "remastered", "remaster",
+    "intro edit", "intro", "edit", "version",
+)
+
+
+def _strip_editions(title):
+    """Drop edition/version phrases so 'Song Original Mix' == 'Song' for matching.
+
+    Strips DJ/electronic labelling (Original Mix, Extended, Remastered, Radio
+    Edit, ...) from BOTH sides. Deliberately leaves 'remix' in place -- a remix
+    is a different recording, not just a labelled edition, so it must stay a
+    distinguishing token (see _has_remix in deezer_search).
+
+    Uses word boundaries (\\b) not just whitespace, so parenthesised /
+    bracketed / dashed editions like '(Original Mix)' or '- Extended Mix'
+    are stripped too (a trailing ')' would defeat a whitespace-only match).
+    """
+    if not title:
+        return title
+    t = title.lower()
+    for phrase in _EDITION_SUFFIXES:
+        # remove as a whole phrase, bounded by word boundaries
+        # (handles '(Original Mix)', ' - Extended Mix', etc.)
+        t = re.sub(r"\b" + re.escape(phrase) + r"\b", " ", t)
+    # also drop a bare 'mix' token (e.g. 'Song mix', 'Song (mix)')
+    t = re.sub(r"\bmix\b", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    # strip trailing separator left by removed edition phrase (e.g. 'Song - ')
+    t = re.sub(r"\s*-\s*$", "", t).strip()
+    return t
+
+
+def _has_remix(title):
+    """True if the (raw) title carries a remix token -- a distinct recording.
+
+    Substring check (not word-bounded) so it catches 'Song (Artist Remix)',
+    'Song - Artist Remix', bracketed/dashed variants -- anywhere 'remix'
+    appears, it's a different recording than the original.
+    """
+    return "remix" in (title or "").lower()
+
+
 # ---------------------------------------------------------------------------
 # search
 # ---------------------------------------------------------------------------
@@ -69,15 +119,37 @@ def deezer_search(dz, query, target_title=None, target_artists=None):
     want_title = target_title or ""
     want_artist = " ".join(target_artists or [])
 
+    # Edition-stripped "core" of the wanted title -- the thing we actually
+    # match on. Deezer/Spotify disagree on which edition suffix a track
+    # carries ("Original Mix" vs bare), so those are noise, not identity.
+    want_core = _tokenize(_strip_editions(want_title))
+    want_remix = _has_remix(want_title)
+
     def score(track):
         t_title = _dz_field(track, "title")
         t_artist = _dz_field(track, "artist", "name")
-        # Use Jaccard as a gradient (not just pass/fail) so 'Hedonic Setpoint
-        # 85' (1.0) beats '... 70' / '... 87' (0.50 each) when Deezer ranks
-        # the wrong one first. Artist match is a bonus, not required.
-        title_sim = _title_similarity(want_title, t_title)
-        if title_sim < 0.5:
-            return 0
+        cand_core = _tokenize(_strip_editions(t_title))
+        # Deezer sometimes includes the artist name in the title itself
+        # (e.g. 'Volen Sentir - Arrival'). Remove those tokens so the title
+        # core reflects only the actual track name, not artist noise.
+        t_artist_tokens = _tokenize(t_artist)
+        cand_core = cand_core - t_artist_tokens
+        if not want_core or not cand_core:
+            return 0.0
+        # A remix is a distinct recording: if the wanted track and this
+        # candidate disagree on remix vs not, never match.
+        if want_remix != _has_remix(t_title):
+            return 0.0
+        # Exact core match (after stripping editions) is the strong signal.
+        if want_core == cand_core:
+            title_sim = 1.0
+        else:
+            # Fall back to Jaccard on the raw titles for non-edition
+            # differences (e.g. "feat. X", "Setpoint 85" vs "70"). The
+            # remix check above already ruled out remix mismatches.
+            title_sim = _title_similarity(want_title, t_title)
+            if title_sim < 0.5:
+                return 0.0
         artist_sim = _title_similarity(want_artist, t_artist) if want_artist and t_artist else 0
         # title contributes 0-1, artist contributes up to 0.5
         return title_sim + (0.5 if artist_sim >= 0.5 else 0)

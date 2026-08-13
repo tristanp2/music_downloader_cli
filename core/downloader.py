@@ -165,6 +165,15 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
         report(f"[{pos}/{total}] {display[:60]}")
         hit = deezer_search(dz, q, target_title=t.name, target_artists=t.artists)
         if not hit:
+            # Fallback: strip edition suffixes from the query. Deezer
+            # returns 0 results for queries like 'Song Original Mix' when
+            # it only has 'Song' in its catalog.
+            from .deezer import _strip_editions
+            q_fb = f"{' '.join(t.artists)} {_strip_editions(t.name)}"
+            if q_fb != q:
+                report(f"    [deezer] fallback search: {q_fb}")
+                hit = deezer_search(dz, q_fb, target_title=t.name, target_artists=t.artists)
+        if not hit:
             report("    [deezer] no match")
             event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.MISSED, "pct": 0})
             missed.append({"name": t.name, "artists": t.artists})
