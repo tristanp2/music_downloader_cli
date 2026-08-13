@@ -119,9 +119,9 @@ def another_server_running():
 
 
 def _server_token():
-    """Shared secret for POST /download. Source: env MUSICDL_SERVER_TOKEN,
+    """Shared secret for POST /download. Source: env MUSIC_DOWNLOADER_SERVER_TOKEN,
     then config/settings.conf `server_token`. None if unset."""
-    env = os.environ.get("MUSICDL_SERVER_TOKEN")
+    env = os.environ.get("MUSIC_DOWNLOADER_SERVER_TOKEN")
     if env:
         return env
     cfg = read_conf(REPO / "config" / "settings.conf")

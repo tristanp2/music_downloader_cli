@@ -21,7 +21,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 # server startup (app.py) by adding a FileHandler to them.
 # ---------------------------------------------------------------------------
 
-logger = logging.getLogger("musicdl")
+logger = logging.getLogger("music_downloader")
 logger.setLevel(logging.DEBUG)
 
 _console = logging.StreamHandler()
@@ -29,7 +29,7 @@ _console.setLevel(logging.INFO)
 _console.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)-5s %(message)s", datefmt="%H:%M:%S"))
 logger.addHandler(_console)
 
-_file_path = str(LOG_DIR / "musicdl.log")
+_file_path = str(LOG_DIR / "music_downloader.log")
 _fh = logging.FileHandler(_file_path, encoding="utf-8")
 _fh.setLevel(logging.DEBUG)
 _fh.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)-5s %(name)s:%(lineno)d %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))

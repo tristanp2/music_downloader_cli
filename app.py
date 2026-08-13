@@ -17,15 +17,15 @@ Endpoints
   GET  /                           -> serves templates/index.html
 
 Auth: POST /download requires header X-Auth-Token matching the shared secret
-(env MUSICDL_SERVER_TOKEN or config/settings.conf server_token). GETs are open
+(env MUSIC_DOWNLOADER_SERVER_TOKEN or config/settings.conf server_token). GETs are open
 (localhost LAN use). Set the token or the endpoint stays unauthenticated.
 
 Run:
   .venv/Scripts/python.exe app.py            # binds via config/settings.conf `bind_host`
-  # BIND_HOST is read from config `bind_host` (or env MUSICDL_BIND_HOST),
+  # BIND_HOST is read from config `bind_host` (or env MUSIC_DOWNLOADER_BIND_HOST),
   # defaulting to 0.0.0.0 (all interfaces). Set `bind_host` to your LAN IP to
   # bind that NIC only, keeping the server off the Tailscale virtual interface.
-  # Optional arg = port (default 8000), or set env MUSICDL_PORT.
+  # Optional arg = port (default 8000), or set env MUSIC_DOWNLOADER_PORT.
 """
 import os
 import sys
@@ -146,16 +146,16 @@ def _push_event(job_id, event):
     for q in queues:
         asyncio.run_coroutine_threadsafe(q.put(dict(event)), loop)
 
-PORT = int(os.environ.get("MUSICDL_PORT", "8000"))
+PORT = int(os.environ.get("MUSIC_DOWNLOADER_PORT", "8000"))
 
 
 def _bind_host():
-    """Interface uvicorn listens on. Precedence: env MUSICDL_BIND_HOST >
+    """Interface uvicorn listens on. Precedence: env MUSIC_DOWNLOADER_BIND_HOST >
     config/settings.conf `bind_host` > default 0.0.0.0 (all interfaces).
     Set `bind_host` to your LAN IP to listen only on that NIC, which keeps
     the server off the Tailscale virtual interface.
     """
-    env = os.environ.get("MUSICDL_BIND_HOST")
+    env = os.environ.get("MUSIC_DOWNLOADER_BIND_HOST")
     if env:
         return env
     return read_conf(REPO / "config" / "settings.conf").get("bind_host") or "0.0.0.0"
@@ -165,7 +165,7 @@ BIND_HOST = _bind_host()
 
 
 def _server_token():
-    env = os.environ.get("MUSICDL_SERVER_TOKEN")
+    env = os.environ.get("MUSIC_DOWNLOADER_SERVER_TOKEN")
     if env:
         return env
     return read_conf(REPO / "config" / "settings.conf").get("server_token") or None

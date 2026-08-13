@@ -30,7 +30,7 @@ from .library import find_existing_track, find_partial_track, tag_and_rename, wr
 from .track import Track
 from .event_types import JobEventType, DownloadStatus
 
-log = logging.getLogger("musicdl")
+log = logging.getLogger("music_downloader")
 
 
 def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=None):

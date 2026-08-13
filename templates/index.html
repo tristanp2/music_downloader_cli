@@ -342,12 +342,12 @@ const icons = {
 
 /* ---- current user (localStorage) ---- */
 function getUser() {
-  var v = localStorage.getItem("musicdl_user");
+  var v = localStorage.getItem("music_downloader_user");
   if (v === "tristan" || v === "marc") return v;
   return "tristan";
 }
 function setUser(v) {
-  localStorage.setItem("musicdl_user", v);
+  localStorage.setItem("music_downloader_user", v);
   for (var fid in knownLib) {
     knownLib[fid].row.remove();
     knownLib[fid].detail.remove();
@@ -369,7 +369,7 @@ async function initUserSelect() {
       opt.textContent = users[i];
       sel.appendChild(opt);
     }
-    var saved = localStorage.getItem("musicdl_user");
+    var saved = localStorage.getItem("music_downloader_user");
     sel.value = saved && users.indexOf(saved) !== -1 ? saved : (data.default || "");
     sel.addEventListener("change", function() {
       setUser(sel.value);

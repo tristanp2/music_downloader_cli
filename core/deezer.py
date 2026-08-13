@@ -14,7 +14,7 @@ from rich.progress import Progress, BarColumn, TextColumn, TaskProgressColumn
 
 from .config import REPO
 
-log = logging.getLogger("musicdl")
+log = logging.getLogger("music_downloader")
 
 
 # ---------------------------------------------------------------------------

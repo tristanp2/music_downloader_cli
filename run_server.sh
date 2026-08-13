@@ -2,7 +2,7 @@
 # run_server.sh - launch the music-downloader webserver (app.py).
 # Portable across Linux, WSL2, and Windows git-bash. Optional $1 = port
 # (default 8000). The bind interface is read from config/settings.conf
-# `bind_host` (or env MUSICDL_BIND_HOST) inside app.py, not hardcoded here.
+# `bind_host` (or env MUSIC_DOWNLOADER_BIND_HOST) inside app.py, not hardcoded here.
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$DIR/.venv/Scripts/python.exe" ]; then
@@ -19,6 +19,6 @@ if [ ! -x "$VENV_PY" ]; then
     exit 1
 fi
 PORT="${1:-8000}"
-export MUSICDL_PORT="$PORT"
+export MUSIC_DOWNLOADER_PORT="$PORT"
 echo "[music_downloader] starting webserver (port $PORT, bind host from config/settings.conf bind_host)  (Ctrl-C to stop)"
 exec "$VENV_PY" app.py
