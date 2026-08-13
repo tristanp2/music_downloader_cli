@@ -44,7 +44,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from core.config import resolve_output_dir, sync_deezer_arl, ARL, read_conf, read_users
+from core.config import resolve_output_dir, sync_deezer_arl, ARL, read_conf, read_users, CONF_SETTINGS
 from core.deezer import init_deezer
 from core.downloader import run_playlist
 from core.registry import list_playlists
@@ -54,6 +54,9 @@ from core import log
 from core import attach_uvicorn_loggers
 from core.job import Job, JobProgress, TrackState
 from core.event_types import JobEventType, DownloadStatus
+
+
+PORT = int(os.environ.get("MUSIC_DOWNLOADER_PORT", "8000")) 
 
 REPO = Path(__file__).resolve().parent
 if str(REPO) not in sys.path:
@@ -79,9 +82,30 @@ async def lifespan(app):
         except Exception as e:
             log.warning("[startup] Deezer login failed: %s", e)
     server_lock.write_lock(PORT)
+    # Periodic sync: re-enqueue every known playlist as a job on an interval
+    # (default 12h). 0 or negative in settings.conf disables it.
+    _sync_interval = float((read_conf(CONF_SETTINGS).get("sync_interval_hours") or "12") or 12)
+    start_scheduler(_sync_interval)
     try:
         yield
     finally:
+        # Close any open SSE connections (job feed + per-job event streams) so
+        # that Ctrl-C / shutdown ends them cleanly instead of leaving the
+        # generators blocked on queue.get() until the OS kills the socket.
+        # Each event_stream generator returns on a None sentinel.
+        with JOB_FEED_LOCK:
+            for q in JOB_FEED_SUBS:
+                try:
+                    q.put_nowait(None)
+                except Exception:
+                    pass
+        with EVENT_SUBS_LOCK:
+            for subs in EVENT_SUBS.values():
+                for q in subs:
+                    try:
+                        q.put_nowait(None)
+                    except Exception:
+                        pass
         server_lock.clear_lock()
 
 
@@ -145,8 +169,48 @@ def _push_event(job_id, event):
         queues = list(EVENT_SUBS.get(job_id, []))
     for q in queues:
         asyncio.run_coroutine_threadsafe(q.put(dict(event)), loop)
+    # Relay track-level progress (tracks/start/pct/done) to the shared feed too,
+    # so every connected tab sees live per-track progress for ANY job -- not just
+    # the creator's per-job SSE. job_done is already covered by JOB_DONE broadcast.
+    t = event.get("type")
+    if t in (JobEventType.TRACKS, JobEventType.START, JobEventType.PCT, JobEventType.DONE):
+        _push_job_feed({"type": t, "job_id": job_id, **{k: v for k, v in event.items() if k != "type"}})
 
-PORT = int(os.environ.get("MUSIC_DOWNLOADER_PORT", "8000"))
+
+# Shared job-feed subscribers: ONE SSE per browser tab (opened at page load),
+# not per-job. Carries job_created / job_done for EVERY job regardless of which
+# user created it, so all simultaneously-connected browsers see new jobs and
+# completions in real time (no 10s poll dependency for cross-user visibility).
+JOB_FEED_SUBS = []
+JOB_FEED_LOCK = threading.Lock()
+
+
+def _job_public(job):
+    """JSON-friendly snapshot of a Job for the shared feed."""
+    return {
+        "id": job.id, "url": job.url, "user": job.user,
+        "status": job.status,
+        "started_at": job.started_at, "finished_at": job.finished_at,
+        # Include progress so a finished job's track rows survive the 10s poll
+        # (GET /jobs now also returns it) and stay visible until the card cap
+        # pushes them out (i.e. only when another job starts and this one scrolls out).
+        "progress": asdict(job.progress),
+    }
+
+
+def _push_job_feed(event):
+    """Broadcast a job-feed event to every connected tab. Same loop-safe
+    pattern as _push_event (uses the global EVENT_LOOP captured at startup)."""
+    global EVENT_LOOP
+    loop = EVENT_LOOP
+    if loop is None:
+        return
+    with JOB_FEED_LOCK:
+        queues = list(JOB_FEED_SUBS)
+    for q in queues:
+        asyncio.run_coroutine_threadsafe(q.put(dict(event)), loop)
+
+
 
 
 def _bind_host():
@@ -243,6 +307,8 @@ def _run_job(job_id, url, user):
         result_copy["folder"] = str(result_copy["folder"])
     _push_event(job_id, {"type": JobEventType.JOB_DONE, "status": job.status,
                          "result": result_copy})
+    # Also broadcast completion to the shared feed so every tab sees it live.
+    _push_job_feed({"type": JobEventType.JOB_DONE, "job": _job_public(job)})
 
 
 def _authenticate(request: Request):
@@ -271,6 +337,123 @@ def index():
     return HTMLResponse("<h1>music-downloader</h1><p>templates/index.html not found.</p>")
 
 
+def _start_job(url, user):
+    """Create a Job and kick off its background worker. Shared by POST /download
+    and the sync enqueuer so every start goes through one path (single queue,
+    one DZ_LOCK, identical SSE wiring). Returns the new job_id."""
+    job_id = uuid.uuid4().hex[:12]
+    with JOBS_LOCK:
+        JOBS[job_id] = Job(
+            id=job_id,
+            url=url,
+            user=user,
+            started_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+        )
+    # Broadcast to the shared job-feed so every connected tab sees the new job
+    # immediately (not just the creator's per-job SSE, and not waiting on a poll).
+    _push_job_feed({"type": JobEventType.JOB_CREATED, "job": _job_public(JOBS[job_id])})
+    threading.Thread(target=_run_job, args=(job_id, url, user), daemon=True).start()
+    return job_id
+
+
+# ---------------------------------------------------------------------------
+# sync: re-enqueue every known playlist as a normal job (filesystem-as-registry)
+# ---------------------------------------------------------------------------
+
+# Guards against overlapping syncs (periodic timer or manual trigger firing
+# while a previous sync is still walking/enqueuing). Enqueue is fast, but the
+# guard also keeps a manual /sync from stacking on top of the scheduled one.
+_SYNC_LOCK = threading.Lock()
+
+
+def _derive_user_for_folder(folder_path):
+    """Given a playlist folder under WORK_DIR_BASE, return its owning user.
+
+    Layout is WORK_DIR_BASE/<user>/<folder>. If the folder sits directly under
+    the base (no user layer), fall back to the first configured user so the
+    job still has a valid whitelist entry.
+    """
+    try:
+        rel = folder_path.resolve().relative_to(WORK_DIR_BASE.resolve())
+        parts = rel.parts
+        if len(parts) >= 2:
+            return parts[0]
+    except Exception:
+        pass
+    users = read_users()
+    return users[0] if users else "tristan"
+
+
+def enqueue_sync_all():
+    """Walk the filesystem registry and enqueue a normal job for each known
+    playlist's Spotify URL. Returns {"queued": N, "jobs": [job_id...], "skipped": reason}.
+
+    Deliberately enqueues EVERY playlist -- including ones that are 100%
+    downloaded -- because the point of a sync is to re-check the Spotify
+    playlist for NEW tracks. The "only fetch what's missing" behaviour lives in
+    core.library.find_existing_track (run_playlist skips already-present FLACs),
+    so re-running a complete playlist is cheap and only pulls genuinely new
+    tracks. Do NOT filter on downloaded/missed counts here -- that would stop
+    sync from noticing added Spotify tracks.
+
+    STRICTLY ADDITIVE: sync (and run_playlist) never delete a downloaded FLAC
+    just because a track was removed from the Spotify playlist. The only
+    deletion that ever happens is cleanup of a PARTIAL/interrupted download
+    (core.library.find_partial_track -> incomplete FLAC). Do NOT add "prune
+    removed tracks" logic -- the user wants removals from Spotify to be ignored,
+    not reflected on disk.
+
+    Skips (and reports) when the Deezer session isn't ready -- a sync with no
+    session would just 503 every job.
+    """
+    if DZ is None or not _deezer_session_ok():
+        return {"queued": 0, "jobs": [], "skipped": "deezer session not ready"}
+    playlists = list_playlists(WORK_DIR_BASE)
+    jobs = []
+    for pl in playlists:
+        url = pl.get("spotify_url")
+        folder = pl.get("folder")
+        if not url or not folder:
+            continue
+        user = _derive_user_for_folder(WORK_DIR_BASE / folder)
+        jobs.append(_start_job(url, user))
+    return {"queued": len(jobs), "jobs": jobs, "skipped": None}
+
+
+def start_scheduler(interval_hours):
+    """Background thread: every interval_hours, enqueue a sync of all playlists.
+
+    Runs only while the interpreter is live (daemon thread, no catch-up for
+    missed intervals -- a box asleep for a day just syncs once on wake). The
+    _SYNC_LOCK prevents a manual /sync from overlapping the scheduled one. If a
+    sync is already in flight, the scheduled tick is skipped (next tick retries).
+    """
+    if not interval_hours or interval_hours <= 0:
+        log.info("[scheduler] disabled (interval <= 0)")
+        return
+    interval = interval_hours * 3600.0
+
+    def _loop():
+        while True:
+            time.sleep(interval)
+            if not _SYNC_LOCK.acquire(blocking=False):
+                log.info("[scheduler] sync already running -- skipping this tick")
+                continue
+            try:
+                log.info("[scheduler] periodic sync starting")
+                res = enqueue_sync_all()
+                log.info("[scheduler] periodic sync enqueued %s jobs (%s)",
+                         res.get("queued"), res.get("skipped") or "ok")
+            except Exception as e:
+                log.error("[scheduler] sync failed: %s", e)
+            finally:
+                _SYNC_LOCK.release()
+
+    t = threading.Thread(target=_loop, name="sync-scheduler", daemon=True)
+    t.start()
+    log.info("[scheduler] started, interval = %s h", interval_hours)
+
+
 @app.post("/download")
 def download(request: Request, payload: dict):
     _authenticate(request)
@@ -282,16 +465,28 @@ def download(request: Request, payload: dict):
         raise HTTPException(status_code=503, detail="Deezer session not ready (ARL missing or login failed)")
     if not _deezer_session_ok():
         raise HTTPException(status_code=503, detail="Deezer session expired -- POST /reload with a fresh ARL")
-    job_id = uuid.uuid4().hex[:12]
-    with JOBS_LOCK:
-        JOBS[job_id] = Job(
-            id=job_id,
-            url=url,
-            user=user,
-            started_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-        )
-    threading.Thread(target=_run_job, args=(job_id, url, user), daemon=True).start()
+    job_id = _start_job(url, user)
     return {"job_id": job_id}
+
+
+@app.post("/sync")
+def sync(request: Request):
+    """Manually trigger a sync: enqueue a normal job for every known playlist.
+
+    Auth-gated like /download. If a sync (periodic or manual) is already in
+    flight, returns 409 so the caller knows to wait rather than stack another.
+    The enqueued jobs appear in the normal queue + SSE -- no separate UI.
+    """
+    _authenticate(request)
+    if not _SYNC_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="sync already running")
+    try:
+        res = enqueue_sync_all()
+    finally:
+        _SYNC_LOCK.release()
+    if res.get("skipped"):
+        raise HTTPException(status_code=503, detail=res["skipped"])
+    return {"queued": res["queued"], "jobs": res["jobs"]}
 
 
 @app.get("/jobs")
@@ -299,11 +494,49 @@ def jobs(request: Request):
     user = _require_user(request)
     with JOBS_LOCK:
         items = sorted(JOBS.values(), key=lambda j: j.started_at, reverse=True)
-    return {"jobs": [{
-        "id": j.id, "url": j.url, "user": j.user,
-        "status": j.status,
-        "started_at": j.started_at, "finished_at": j.finished_at,
-    } for j in items]}
+    return {"jobs": [_job_public(j) for j in items]}
+
+
+@app.get("/jobs/stream")
+async def job_feed_stream(request: Request):
+    """Shared SSE: ONE connection per browser tab (opened at page load).
+
+    Registered BEFORE /jobs/{job_id} so the static path wins over the
+    parameterized one (Starlette matches by registration order, not by
+    specificity). Broadcasts job_created / job_done for EVERY job regardless
+    of which user created it, so all simultaneously-connected tabs see new
+    jobs and completions in real time. On connect it also replays the current
+    job list as job_created events, so a tab opened mid-run immediately shows
+    what's already in flight. Auth: open (same as /jobs); the feed carries no
+    secrets.
+    """
+    queue = asyncio.Queue()
+    with JOB_FEED_LOCK:
+        JOB_FEED_SUBS.append(queue)
+
+    # Replay existing jobs so a freshly-opened tab is in sync at once.
+    with JOBS_LOCK:
+        existing = [j for j in JOBS.values()]
+    for j in existing:
+        await queue.put({"type": JobEventType.JOB_CREATED, "job": _job_public(j)})
+
+    async def event_stream():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                evt = await queue.get()
+                if evt is None:
+                    return
+                yield f"event: {evt['type'].value}\ndata: {json.dumps(evt)}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            with JOB_FEED_LOCK:
+                if queue in JOB_FEED_SUBS:
+                    JOB_FEED_SUBS.remove(queue)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/jobs/{job_id}")

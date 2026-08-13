@@ -152,6 +152,10 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
         # downloading. deemix sees a same-named file on disk and treats it as
         # alreadyDownloaded, so the partial would otherwise block the real
         # download forever (track stuck as 'failed').
+        # SAFETY: find_partial_track only matches INCOMPLETE FLACs (missing
+        # TITLE/ALBUM tag = interrupted download). A fully-downloaded track that
+        # was removed from the Spotify playlist is NEVER touched here -- sync is
+        # strictly additive and does not reflect Spotify removals on disk.
         partial = find_partial_track(out_dir, t.artists, t.name)
         if partial:
             report(f"[{pos}/{total}] {display[:60]}")

@@ -188,6 +188,7 @@
   .empty { color: var(--text-d); font-size: 11px; }
 
   /* ---- job cards ---- */
+  #jobs { max-height: 60vh; overflow-y: auto; padding-right: 4px; }
   .job {
     border: 1px solid var(--border);
     padding: 10px;
@@ -309,6 +310,7 @@
     <h2>new download</h2>
     <input id="url" type="text" placeholder="https://open.spotify.com/playlist/..." />
     <button id="go">[ queue ]</button>
+    <button id="sync">[ sync all ]</button>
     <div id="msg" class="stats"></div>
   </section>
 
@@ -499,7 +501,11 @@ function updateJobCard(j) {
     renderTrackRow(listEl, trackArr[i], total);
   }
 
-  listEl.style.display = (trackArr.length || j.status === "running") ? "" : "none";
+  // Keep the list visible if rows are already rendered (live SSE) so finished
+  // jobs keep showing their tracks -- they only vanish when the card is removed
+  // (another job starts and this one scrolls out / is pruned).
+  const hasRows = listEl.querySelectorAll(".track-row").length > 0;
+  listEl.style.display = (hasRows || trackArr.length || j.status === "running") ? "" : "none";
 
   if (j.result && j.result.ok) {
     const r = j.result;
@@ -529,6 +535,17 @@ function syncJobs(jobs) {
       knownJobs[id].el.remove();
       delete knownJobs[id];
     }
+  }
+
+  // Cap the visible queue so it can't grow unbounded; newest jobs are appended last.
+  const MAX_CARDS = 30;
+  const box = $("#jobs");
+  while (box.querySelectorAll(".job").length > MAX_CARDS) {
+    const first = box.querySelector(".job");
+    if (!first) break;
+    const rid = first.dataset.job;
+    first.remove();
+    if (knownJobs[rid]) delete knownJobs[rid];
   }
 
   if (!jobs.length) {
@@ -568,106 +585,37 @@ async function refreshJobs() {
   } catch {}
 }
 
-/* ---- SSE: real-time job progress ---- */
-const activeSSE = {};
-
-function watchJob(jobId) {
-  if (activeSSE[jobId]) return; // already watching
-  const es = new EventSource("/jobs/" + encodeURIComponent(jobId) + "/events");
-  activeSSE[jobId] = es;
-
-  es.addEventListener("tracks", function(e) {
-    var d = JSON.parse(e.data);
-    var ctx = knownJobs[jobId];
-    if (!ctx) return;
+/* ---- shared track-progress renderer (driven by the ONE job-feed SSE) ---- */
+function applyTrackEvent(jobId, type, d) {
+  const ctx = knownJobs[jobId];
+  if (!ctx) return;
+  if (type === "tracks") {
     ctx.listEl.style.display = "";
-    for (var i = 0; i < d.items.length; i++) {
-      var t = { pos: d.items[i].pos, name: d.items[i].name, status: "pending", pct: 0 };
+    for (let i = 0; i < d.items.length; i++) {
+      const t = { pos: d.items[i].pos, name: d.items[i].name, status: "pending", pct: 0 };
       renderTrackRow(ctx.listEl, t, d.total);
     }
-  });
-
-  es.addEventListener("start", function(e) {
-    var d = JSON.parse(e.data);
-    var ctx = knownJobs[jobId];
-    if (!ctx) return;
-    var row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
+  } else if (type === "start") {
+    const row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
     if (row) {
       row.querySelector(".track-name").className = "track-name";
       renderTrackRow(ctx.listEl, { pos: d.pos, name: d.name, status: "downloading", pct: 0 }, ctx.listEl.querySelectorAll(".track-row").length);
     }
-  });
-
-  es.addEventListener("pct", function(e) {
-    var d = JSON.parse(e.data);
-    var ctx = knownJobs[jobId];
-    if (!ctx) return;
-    var row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
+  } else if (type === "pct") {
+    const row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
     if (!row) return;
-    var barFill = row.querySelector(".mini-bar .fill");
-    if (barFill) {
-      barFill.style.width = (d.pct || 0) + "%";
-      barFill.className = "fill";
-    }
-    var barWrap = row.querySelector(".mini-bar");
+    const barFill = row.querySelector(".mini-bar .fill");
+    if (barFill) { barFill.style.width = (d.pct || 0) + "%"; barFill.className = "fill"; }
+    const barWrap = row.querySelector(".mini-bar");
     if (barWrap) barWrap.style.display = "";
-    var statusEl = row.querySelector(".track-status");
-    if (statusEl) {
-      statusEl.className = "track-status downloading";
-      statusEl.textContent = icons.downloading;
-    }
-  });
-
-  es.addEventListener("done", function(e) {
-    var d = JSON.parse(e.data);
-    var ctx = knownJobs[jobId];
-    if (!ctx) return;
-    var row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
+    const statusEl = row.querySelector(".track-status");
+    if (statusEl) { statusEl.className = "track-status downloading"; statusEl.textContent = icons.downloading; }
+  } else if (type === "done") {
+    const row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
     if (!row) return;
-    // Preserve the existing track name so renderTrackRow doesn't blank it.
-    var existingName = row.querySelector(".track-name").textContent;
+    const existingName = row.querySelector(".track-name").textContent;
     renderTrackRow(ctx.listEl, { pos: d.pos, name: existingName, status: d.status, pct: d.pct }, ctx.listEl.querySelectorAll(".track-row").length);
-  });
-
-  es.addEventListener("job_done", function(e) {
-    var d = JSON.parse(e.data);
-    // Update the job card summary from the stored job detail
-    fetch("/jobs/" + encodeURIComponent(jobId) + "?user=" + encodeURIComponent(getUser()))
-      .then(function(r) { return r.json(); })
-      .then(function(j) { updateJobCard(j); });
-    // Refresh library list since a new playlist.meta.json was written
-    refreshPlaylists();
-    delete activeSSE[jobId];
-    es.close();
-  });
-
-  es.onerror = function() {
-    // SSE auto-reconnects. After a grace period, check if we still need
-    // this connection or if the job is already finished.
-    setTimeout(function() {
-      if (!activeSSE[jobId]) return;
-      fetch("/jobs/" + encodeURIComponent(jobId) + "?user=" + encodeURIComponent(getUser()))
-        .then(function(r) {
-          if (!r.ok) throw new Error("gone");
-          return r.json();
-        })
-        .then(function(j) {
-          if (j.status !== "running") {
-            // Job finished (or error) while we were disconnected -- fetch final state
-            updateJobCard(j);
-            refreshPlaylists();
-            delete activeSSE[jobId];
-            es.close();
-          }
-          // else: still running, let SSE reconnect on its own
-        })
-        .catch(function() {
-          // Job gone (server restarted) or network dead -- clean up
-          delete activeSSE[jobId];
-          es.close();
-        });
-    }, 3000);
-  };
+  }
 }
 
 async function refreshPlaylists() {
@@ -837,11 +785,32 @@ $("#go").addEventListener("click", async () => {
     // Ensure the job card exists, then open SSE for live progress
     var ctx = ensureJobCard({ id: r.job_id, url: url, user: getUser(), status: "running" });
     ctx.metaEl.innerHTML = '<span class="badge running">running</span> &nbsp; ' + esc(url);
-    watchJob(r.job_id);
     // One-time fetch of the list view (lightweight)
     refreshJobs();
   } catch (e) {
     $("#msg").textContent = "error: " + e.message;
+  }
+});
+
+async function postSync() {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers["X-Auth-Token"] = token;
+  const r = await fetch("/sync", { method: "POST", headers });
+  if (r.status === 409) throw new Error("sync already running");
+  if (!r.ok) { const e = await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail || r.statusText); }
+  return r.json();
+}
+
+// Manually trigger a sync: enqueue a job for every known playlist. The jobs
+// surface in the normal queue, so no separate UI is needed.
+$("#sync").addEventListener("click", async () => {
+  $("#msg").textContent = "syncing all playlists...";
+  try {
+    const r = await postSync();
+    $("#msg").textContent = "queued " + r.queued + " playlist job(s)";
+    refreshJobs();
+  } catch (e) {
+    $("#msg").textContent = "sync error: " + e.message;
   }
 });
 
@@ -864,7 +833,6 @@ async function startUpdate(url) {
     $("#msg").textContent = "job " + r.job_id + " started (update)";
     var ctx = ensureJobCard({ id: r.job_id, url: url, user: getUser(), status: "running" });
     ctx.metaEl.innerHTML = '<span class="badge running">running</span> &nbsp; ' + esc(url);
-    watchJob(r.job_id);
     refreshJobs();
   } catch (e) {
     $("#msg").textContent = "error: " + e.message;
@@ -877,6 +845,36 @@ async function tick() {
   await refreshPlaylists();
 }
 tick();
+
+// Shared job-feed SSE: ONE connection for this tab, opened at page load. Carries
+// ONE shared SSE per tab. Carries job_created / job_done / per-track progress
+// for EVERY job (any user), so a job your roommate queues -- and its live track
+// progress -- appears on your screen in real time. On a real disconnect the
+// heartbeat poll reloads the page, which re-opens this connection, so onerror
+// needs no reconnect logic of its own.
+(function jobFeed() {
+  const es = new EventSource("/jobs/stream");
+  es.addEventListener("job_created", function(e) {
+    const d = JSON.parse(e.data);
+    const j = d.job;
+    ensureJobCard({ id: j.id, url: j.url, user: j.user, status: j.status || "running" });
+    updateJobCard(j);
+  });
+  // Per-track progress is relayed by the backend for EVERY job; apply to its card.
+  ["tracks", "start", "pct", "done"].forEach(function(type) {
+    es.addEventListener(type, function(e) {
+      const d = JSON.parse(e.data);
+      ensureJobCard({ id: d.job_id, url: "", user: "", status: "running" });
+      applyTrackEvent(d.job_id, type, d);
+    });
+  });
+  es.addEventListener("job_done", function(e) {
+    const d = JSON.parse(e.data);
+    updateJobCard(d.job);
+    refreshPlaylists();
+  });
+  es.onerror = function() { /* auto-reconnects; heartbeat reloads the page on real outage */ };
+})();
 
 /* ---- heartbeat: check server every 10s, show overlay when down, reload on recovery ---- */
 (function heartbeat() {

@@ -24,6 +24,7 @@ class JobEventType(str, Enum):
     PCT = "pct"
     DONE = "done"
     JOB_DONE = "job_done"
+    JOB_CREATED = "job_created"   # shared job-feed broadcast (any job, any user)
 
 
 class DownloadStatus(str, Enum):
