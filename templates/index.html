@@ -845,6 +845,14 @@ $("#go").addEventListener("click", async () => {
   }
 });
 
+// Pressing Enter in the URL input triggers the same queue action as the button.
+$("#url").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    $("#go").click();
+  }
+});
+
 // Re-download a playlist already in the library (Update button). Reuses the
 // existing /download endpoint with the playlist's stored Spotify URL; the
 // backend skip-check means only missing/partial tracks are actually fetched.
