@@ -566,7 +566,7 @@ function updateJobCard(j) {
   // (another job starts and this one scrolls out / is pruned).
   const hasRows = listEl.querySelectorAll(".track-row").length > 0;
   const shouldShow = (hasRows || trackArr.length || j.status === "running");
-  if (shouldShow && ctx.open) listEl.style.display = "";
+  if (shouldShow && ctx.open) setJobOpen(ctx, true);
 
   // Result chips in the title bar.
   if (j.result && j.result.ok) {
@@ -664,13 +664,7 @@ function applyTrackEvent(jobId, type, d) {
   if (!ctx) return;
 
   if (type === "tracks") {
-    // This job has just started actively downloading (the TRACKS event is
-    // emitted once, up front, when run_playlist begins). Focus it: collapse
-    // the others and uncollapse this one, so the job that's actually pulling
-    // FLACs is the one you're watching -- not a queued job created later.
-    collapseOthers(jobId);
-    setJobOpen(ctx, true);
-    // reset the in-memory tally for this job (no DOM traversal needed)
+    // This job has begun actively downloading (TRACKS fires once up front).
     ctx.counts = { downloaded: 0, skipped: 0, missed: 0, failed: 0 };
     for (let i = 0; i < d.items.length; i++) {
       const t = { pos: d.items[i].pos, name: d.items[i].name, status: "pending", pct: 0 };
@@ -686,6 +680,13 @@ function applyTrackEvent(jobId, type, d) {
       renderTrackRow(ctx.listEl, { pos: d.pos, name: d.name, status: "downloading", pct: 0 }, ctx.listEl.querySelectorAll(".track-row").length);
     }
   } else if (type === "pct") {
+    // A mid-range PCT (1-99%) means the progress bar is actively filling --
+    // that's the moment to focus this job: collapse others and expand the body.
+    // Rule: "show the body if the progress bar is actually moving." Do it once.
+    if (!ctx.open && d.pct > 0 && d.pct < 100) {
+      collapseOthers(jobId);
+      setJobOpen(ctx, true);
+    }
     const row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
     if (!row) return;
     const barFill = row.querySelector(".mini-bar .fill");
@@ -695,6 +696,8 @@ function applyTrackEvent(jobId, type, d) {
     const statusEl = row.querySelector(".track-status");
     if (statusEl) { statusEl.className = "track-status downloading"; statusEl.textContent = icons.downloading; }
   } else if (type === "done") {
+    // A track finished. (The body's auto-open is handled on the first non-zero
+    // PCT -- "if a progress bar moves, open the body" -- so we don't open here.)
     const row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
     if (row) {
       const existingName = row.querySelector(".track-name").textContent;
