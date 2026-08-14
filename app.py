@@ -163,12 +163,19 @@ def _push_event(job_id, event):
     """
     global EVENT_LOOP
     loop = EVENT_LOOP
-    if loop is None:
-        return  # server not fully started yet, or loop wasn't captured
+    if loop is None or loop.is_closed():
+        return  # server not fully started, or loop already torn down
     with EVENT_SUBS_LOCK:
         queues = list(EVENT_SUBS.get(job_id, []))
     for q in queues:
-        asyncio.run_coroutine_threadsafe(q.put(dict(event)), loop)
+        try:
+            asyncio.run_coroutine_threadsafe(q.put(dict(event)), loop)
+        except RuntimeError:
+            # Event loop is closing/closed (e.g. during Ctrl-C shutdown) ->
+            # no subscribers are listening, so just drop the event rather
+            # than let the worker thread throw "Event loop is closed" and
+            # dump a giant traceback at process exit.
+            return
     # Relay track-level progress (tracks/start/pct/done) to the shared feed too,
     # so every connected tab sees live per-track progress for ANY job -- not just
     # the creator's per-job SSE. job_done is already covered by JOB_DONE broadcast.
@@ -203,12 +210,17 @@ def _push_job_feed(event):
     pattern as _push_event (uses the global EVENT_LOOP captured at startup)."""
     global EVENT_LOOP
     loop = EVENT_LOOP
-    if loop is None:
-        return
+    if loop is None or loop.is_closed():
+        return  # server not fully started, or loop already torn down
     with JOB_FEED_LOCK:
         queues = list(JOB_FEED_SUBS)
     for q in queues:
-        asyncio.run_coroutine_threadsafe(q.put(dict(event)), loop)
+        try:
+            asyncio.run_coroutine_threadsafe(q.put(dict(event)), loop)
+        except RuntimeError:
+            # Same as _push_event: drop on a closed loop instead of throwing
+            # "Event loop is closed" from the worker thread at shutdown.
+            return
 
 
 
