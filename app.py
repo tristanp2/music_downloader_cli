@@ -461,7 +461,8 @@ def enqueue_sync_all():
         # Fall back to deriving from the folder path in case the "user" field
         # is missing (e.g. older/foreign meta files).
         user = pl.get("user") or _derive_user_for_folder(WORK_DIR_BASE / folder)
-        jobs.append(_start_job(url, user))
+        name = pl.get("name") or ""
+        jobs.append(_start_job(url, user, name))
     return {"queued": len(jobs), "jobs": jobs, "skipped": None}
 
 
