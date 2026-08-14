@@ -2,17 +2,17 @@
 
 Read a Spotify playlist and download each track as lossless **FLAC** via
 [Deezer](https://deezer.com) (HiFi/FLAC tier required for true lossless).
+Spotify is used **only** to read the playlist; Deezer (via `deemix`) does the
+actual FLAC download.
 
-Spotify is used **only** to read the playlist. Deezer does the actual FLAC
-download (via `deemix`).
 ## Requirements
 
 - Python 3.11+
 - A Deezer account with the **HiFi** tier (free tier gives 128 kbps MP3 only;
   HiFi gives CD-quality FLAC). A free trial qualifies.
 - A Spotify app (developer dashboard) with `client_id` / `client_secret`, plus
-  a Spotify Premium account  --  used to read playlist metadata via the Web API.
-- `deezer` and `deemix` Python packages (installed in the venv below).
+  a Spotify Premium account — used to read playlist metadata via the Web API.
+- `deezer-py`, `deemix`, `fastapi`, `uvicorn`, `rich` (installed in the venv).
 
 ## Install
 
@@ -23,8 +23,8 @@ cd music_downloader_cli
 # create an isolated environment
 python -m venv .venv
 
-# activate it (so `python` / `pip` mean the venv)
-#   macOS / Linux:
+# activate it
+#   macOS / Linux / WSL2:
 source .venv/bin/activate
 #   Windows (cmd/PowerShell):
 .venv\Scripts\activate
@@ -33,80 +33,74 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-After activating, `python` resolves to the venv interpreter, which has
-`deezer` and `deemix`. That's the only reason for the venv  --  it isolates
-these third-party packages from your system Python.
+After activating, `python` resolves to the venv interpreter, which has all the
+third-party packages.
 
 ## Configure secrets (all gitignored, never committed)
 
-1. **Deezer token**  --  log into Deezer in your browser, then copy the `arl`
-   cookie value into `deezer.arl` (one line). The script auto-syncs it into
-   `config/.arl` for deemix on each run, so this is the only Deezer file you
+1. **Deezer token** — log into Deezer in your browser, then copy the `arl`
+   cookie value into `deezer.arl` (one line). On each run the server copies it
+   into `config/.arl` for deemix, so `deezer.arl` is the only Deezer file you
    edit.
-2. **Spotify app creds**  --  put your Spotify developer app's
-   `client_id` and `client_secret` into `config/settings.conf`
-   (same file as the `output_dir` setting):
+2. **Spotify app creds** — put your Spotify developer app's `client_id` and
+   `client_secret` into `config/settings.conf`:
    ```ini
    spotify-id = <your client id>
    spotify-secret = <your client secret>
    ```
    The first run opens your browser to approve the app; the resulting token is
    cached in `spotify_token.json` and refreshed automatically.
+3. **Output directory** — add to `config/settings.conf`:
+   ```ini
+   output_dir = <your output dir>
+   ```
+   The playlist name is appended as a subfolder (see Output below).
+4. **Users** — `config/settings.conf` lists who can download:
+   ```ini
+   users = <user1,user2,...>
+   ```
+   Each user gets their own subfolder under `output_dir`. Defaults to
+   `user1` if omitted.
+5. **Network bind** — `config/settings.conf` `bind_host` controls which
+   interface the server listens on:
+   ```ini
+   bind_host = <host>        # all interfaces (LAN + localhost)
+   ```
+6. **Server token (optional)** — if set, `POST /download` requires an
+   `X-Auth-Token` header matching it. GETs (the UI, job list) stay open for
+   localhost/LAN use.
+   ```ini
+   server_token = <shared secret>
+   ```
 
-## Run
+A `config/settings.template.conf` is provided — copy it to
+`config/settings.conf` and fill in your values.
+
+## Run the server
 
 ```bash
-# with the venv activated:
-python spotify_to_flac.py
+# portable launcher (picks the venv automatically; arg = port, default 8000)
+./run_server.sh            # macOS / Linux / WSL2
+run_server.cmd             # Windows
 
-# or, without activating, call the venv interpreter directly:
-#   macOS / Linux:  .venv/bin/python spotify_to_flac.py
-#   Windows:        .venv\Scripts\python.exe spotify_to_flac.py
+# or directly with the venv interpreter
+.venv/Scripts/python.exe app.py        # Windows
+.venv/bin/python app.py                # macOS / Linux / WSL2
 ```
-
-The script runs an interactive loop. Paste a Spotify playlist/album URL when
-prompted; it downloads every track as FLAC, then waits for the next URL.
-
-- Type `quit`, `exit`, or `q` (or Enter / Ctrl-C) to stop.
-- A non-Spotify URL is rejected with a message; the loop continues.
 
 ## Output
 
-- Downloads land in `<base>/<playlist name>/` (the folder is named after the
-  playlist, not its ID).
-- The output **base** directory is resolved in this order:
-  1. `MUSIC_DOWNLOADER_OUT` environment variable (highest priority):
-     ```bash
-     MUSIC_DOWNLOADER_OUT=/data/music python spotify_to_flac.py
-     ```
-  2. `output_dir` in `config/settings.conf` (edit the template there):
-     ```
-     output_dir = D:/music/flac
-     ```
+- Downloads land in `<output_dir>/<user>/<playlist folder>/`. The folder is
+  named after the playlist (not its Spotify ID). `users = user1,user2` gives
+  `.../user1/...` and `.../user2/...`.
+- The output **base** directory resolves in this order:
+  1. `MUSIC_DOWNLOADER_OUT` environment variable (highest priority)
+  2. `output_dir` in `config/settings.conf`
   3. Default if neither is set: `~/Music/music_downloader_outputs`
-- `config/settings.conf` supports `~` for home and absolute paths. It is
-  gitignored (machine-specific), so each machine sets its own path.
-- Tracks Deezer can't match are written to `missed_tracks.json` inside the
-  playlist's output folder.
+- **Filesystem-as-registry**: each playlist folder holds a
+  `playlist.meta.json` recording the Spotify URL, name, and per-track status.
+  The server reads this to list known playlists and to know what to re-check on
+  sync — so the disk contents *are* the state; there's no separate database.
+- Tracks Deezer can't match are written as partial/incomplete and reported in
+  the job result; a completed job shows the missed count in its card.
 
-## Notes
-
-- Deezer HiFi = CD-quality 16/44.1 FLAC. This is lossless; it is not 24-bit
-  Hi-Res.
-- The Deezer `arl` token expires when Deezer logs you out. Re-grab the cookie
-  and update `deezer.arl` to resume downloads.
-- **File naming is handled by the script, not `config/config.json`.** Each
-  downloaded track is renamed to `NN - Artist - Title.flac` (zero-padded
-  playlist position) and tagged with the Vorbis `TRACKNUMBER` comment = `NN`,
-  so players like the Denon Prime 4 keep the original Spotify playlist order
-  (a missed track leaves a gap rather than re-numbering). `config/config.json`
-  is deemix's auto-generated state (gitignored); the script overrides its
-  folder and naming settings at runtime, so do not edit it for naming.
-- **Flat layout:** downloads are written directly into the playlist folder
-  (no artist/album subfolders), which the script also forces at runtime.
-
-## .gitignore
-
-Excludes `.venv/`, `music_downloader_outputs/`, and all secrets (`deezer.arl`,
-`spotify_token.json`, `config/settings.conf`, `config/.arl`). Nothing
-sensitive is committed.
