@@ -47,6 +47,7 @@ from fastapi.staticfiles import StaticFiles
 from core.config import resolve_output_dir, sync_deezer_arl, ARL, read_conf, read_users, CONF_SETTINGS
 from core.deezer import init_deezer
 from core.downloader import run_playlist
+from core.spotify import validate_spotify_url, get_spotify_token, parse_spotify_playlist
 from core.registry import list_playlists
 from core.library import find_existing_track
 from core import server_lock
@@ -373,16 +374,20 @@ def index():
     return HTMLResponse("<h1>music-downloader</h1><p>templates/index.html not found.</p>")
 
 
-def _start_job(url, user):
+def _start_job(url, user, name=""):
     """Create a Job and kick off its background worker. Shared by POST /download
     and the sync enqueuer so every start goes through one path (single queue,
-    one DZ_LOCK, identical SSE wiring). Returns the new job_id."""
+    one DZ_LOCK, identical SSE wiring). `name` is the resolved playlist title,
+    populated up-front by the manual /download path so the card shows it
+    immediately; sync passes "" and the worker fills it on completion.
+    Returns the new job_id."""
     job_id = uuid.uuid4().hex[:12]
     with JOBS_LOCK:
         JOBS[job_id] = Job(
             id=job_id,
             url=url,
             user=user,
+            name=name,
             started_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
         )
     # Broadcast to the shared job-feed so every connected tab sees the new job
@@ -505,7 +510,22 @@ def download(request: Request, payload: dict):
         raise HTTPException(status_code=503, detail="Deezer session not ready (ARL missing or login failed)")
     if not _deezer_session_ok():
         raise HTTPException(status_code=503, detail="Deezer session expired -- POST /reload with a fresh ARL")
-    job_id = _start_job(url, user)
+
+    # Resolve + validate the playlist identity BEFORE it enters the queue. A
+    # garbage URL must surface at the input box, never as a nameless job card.
+    playlist_id = validate_spotify_url(url)
+    if not playlist_id:
+        raise HTTPException(status_code=400, detail="Invalid Spotify playlist URL")
+    try:
+        token = get_spotify_token()
+        parsed = parse_spotify_playlist(token, playlist_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not resolve Spotify playlist: {e}")
+    name = (parsed.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Spotify playlist has no name")
+
+    job_id = _start_job(url, user, name=name)
     return {"job_id": job_id}
 
 
