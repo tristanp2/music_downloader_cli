@@ -903,9 +903,22 @@ window.toggleLib = async function(row) {
   ctx.chevron.classList.add("open");
 };
 
+// Disable the queue button while a request is in flight so rapid clicks /
+// Enter presses can't spam the job queue (the backend also rejects duplicate
+// active jobs, but this gives immediate visual feedback and stops the race).
+function setGoBusy(on) {
+  const go = document.getElementById("go");
+  if (go) go.disabled = on;
+}
+function setSyncBusy(on) {
+  const s = document.getElementById("sync");
+  if (s) s.disabled = on;
+}
+
 $("#go").addEventListener("click", async () => {
   const url = $("#url").value.trim();
   if (!url) return;
+  setGoBusy(true);
   $("#msg").textContent = "starting...";
   try {
     const r = await postDownload(url);
@@ -920,6 +933,8 @@ $("#go").addEventListener("click", async () => {
     refreshJobs();
   } catch (e) {
     $("#msg").textContent = "error: " + e.message;
+  } finally {
+    setGoBusy(false);
   }
 });
 
@@ -936,12 +951,15 @@ async function postSync() {
 // surface in the normal queue, so no separate UI is needed.
 $("#sync").addEventListener("click", async () => {
   $("#msg").textContent = "syncing all playlists...";
+  setSyncBusy(true);
   try {
     const r = await postSync();
     $("#msg").textContent = "queued " + r.queued + " playlist job(s)";
     refreshJobs();
   } catch (e) {
     $("#msg").textContent = "sync error: " + e.message;
+  } finally {
+    setSyncBusy(false);
   }
 });
 

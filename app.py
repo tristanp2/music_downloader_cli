@@ -380,9 +380,18 @@ def _start_job(url, user, name=""):
     one DZ_LOCK, identical SSE wiring). `name` is the resolved playlist title,
     populated up-front by the manual /download path so the card shows it
     immediately; sync passes "" and the worker fills it on completion.
-    Returns the new job_id."""
-    job_id = uuid.uuid4().hex[:12]
+
+    The "already active?" check and the Job insert happen atomically under
+    JOBS_LOCK so two concurrent requests (e.g. two users hitting send at the
+    same instant) can't both pass the check and double-enqueue the same
+    (user, url). Returns the new job_id, or None if an active job for this
+    (user, url) already exists. Callers turn the None into a 409 / skip."""
     with JOBS_LOCK:
+        for job in JOBS.values():
+            if (job.user == user and job.url == url
+                    and job.status not in (DownloadStatus.OK, DownloadStatus.ERROR)):
+                return None
+        job_id = uuid.uuid4().hex[:12]
         JOBS[job_id] = Job(
             id=job_id,
             url=url,
@@ -462,7 +471,14 @@ def enqueue_sync_all():
         # is missing (e.g. older/foreign meta files).
         user = pl.get("user") or _derive_user_for_folder(WORK_DIR_BASE / folder)
         name = pl.get("name") or ""
-        jobs.append(_start_job(url, user, name))
+        # _start_job performs the "already active?" check atomically and returns
+        # None if a job for this (user, url) is already queued/running. This
+        # stops a manual /sync (or a fast double-click, or two users syncing at
+        # once) from queuing every playlist twice while the first batch runs.
+        jid = _start_job(url, user, name=name)
+        if jid is None:
+            continue
+        jobs.append(jid)
     return {"queued": len(jobs), "jobs": jobs, "skipped": None}
 
 
@@ -526,7 +542,17 @@ def download(request: Request, payload: dict):
     if not name:
         raise HTTPException(status_code=400, detail="Spotify playlist has no name")
 
+    # _start_job checks "already active?" atomically (under JOBS_LOCK) and
+    # returns None if a job for this (user, url) is already queued/running --
+    # so a duplicate can't slip through two concurrent requests (e.g. two users
+    # hitting send during the same Spotify lookup). Tristan and marc can each
+    # queue the same playlist; only a second request for the SAME user is 409'd.
     job_id = _start_job(url, user, name=name)
+    if job_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail="A download for this playlist is already in progress",
+        )
     return {"job_id": job_id}
 
 
