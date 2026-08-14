@@ -63,18 +63,65 @@ def _is_complete_flac(path):
 
 def _title_matches(flac_path, title):
     """Return True if the on-disk FLAC's TITLE (parsed from the filename) is a
-    fuzzy match for the requested Spotify title. Match rule: normalized Spotify
-    title must be contained in (or contain) the on-disk title. This tolerates
-    Deezer filename suffixes like ' (Original Mix)'. Title-only (not artist):
-    Spotify and Deezer routinely catalog the same track under different artist
-    strings, so matching on artist would cause false negatives.
+    match for the requested Spotify title, meaning "same recording -> skip".
+
+    Match rule, in order:
+      1. Exact normalized equality (case/punctuation-insensitive).
+      2. Approved-edition match in EITHER direction: one title equals the other
+         plus exactly a recognized SAME-RECORDING marker -- "(Original Mix)" or
+         "(Extended Mix)". This tolerates the Spotify<->Deezer labeling
+         inconsistency (one service carries the suffix, the other doesn't).
+
+    Anything else is treated as a DIFFERENT recording and is NOT skipped --
+    including any remix/version tail ("(Mystic State Remix)", "VIP Mix", "Dub",
+    "Radio Edit"), because those are distinct tracks, not just labelled editions.
+    This is what previously broke: the old substring-containment rule let
+    "Seek & Move - Mystic State Remix" falsely match the base "Seek & Move".
+
+    NOTE: duration-based fallback is intentionally NOT here yet -- see the
+    planned tier 3. Title-only for now.
     """
     want = _normalize(title)
     if not want:
         return False
     _, ftitle = _core_artist_title(flac_path.stem)
     fnt = _normalize(ftitle)
-    return bool(fnt and (want in fnt or fnt in want))
+    if not fnt:
+        return False
+    # 1. exact
+    if want == fnt:
+        return True
+    # 2. approved-edition match, either direction
+    return _same_recording_with_edition(want, fnt)
+
+
+# Recognized SAME-RECORDING edition markers. Conservative on purpose: only
+# markers that denote the identical audio under a different label. Remixes,
+# VIPs, dubs, radio edits, etc. are deliberately excluded -- they are different
+# recordings.
+_APPROVED_EDITIONS = {"original mix", "extended mix", "extended"}
+
+
+def _same_recording_with_edition(a, b):
+    """True if `a` and `b` are identical except one carries an approved-edition
+    suffix (in either order). The suffix must be a parenthesised/bounded marker
+    from _APPROVED_EDITIONS, attached after the shared core title.
+
+    Comparison is on normalized strings (see _normalize), so spaces/punctuation
+    inside the edition marker don't matter -- "original mix" and "originalmix"
+    match identically.
+    """
+    APPROVED = {_normalize(e) for e in _APPROVED_EDITIONS}
+    # Check a == b + approved-suffix, then b == a + approved-suffix.
+    for core, full in ((a, b), (b, a)):
+        if not full.startswith(core):
+            continue
+        tail = full[len(core):]
+        # strip a leading separator (space, dash, parenthesis, dot)
+        tail = re.sub(r"^[\s\-(\.]+", "", tail).strip()
+        if tail in APPROVED:
+            return True
+    return False
 
 
 def find_existing_track(out_dir, artists, title):

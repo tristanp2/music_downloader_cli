@@ -128,7 +128,14 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
     statuses = []
 
     for i, t in enumerate(tracks, 1):
-        q = f"{' '.join(t.artists)} {t.name}"
+        # Search Deezer using only the FIRST listed artist. Spotify often lists
+        # remixers/featurees as additional artists (e.g. "Christoph Faust, BLANKA
+        # (ES)"), and concatenating every artist into the query over-specifies it
+        # -- Deezer returns 0 results. The scorer still ranks candidates against
+        # ALL artists via target_artists, so we don't lose disambiguation; we
+        # just send Deezer a query it can actually find.
+        lead_artist = t.artists[0] if t.artists else ""
+        q = f"{lead_artist} {t.name}".strip()
         artist_part = " - ".join(t.artists)
         if artist_part:
             display = f"{artist_part} - {t.name}"
@@ -169,11 +176,11 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
         report(f"[{pos}/{total}] {display[:60]}")
         hit = deezer_search(dz, q, target_title=t.name, target_artists=t.artists)
         if not hit:
-            # Fallback: strip edition suffixes from the query. Deezer
-            # returns 0 results for queries like 'Song Original Mix' when
-            # it only has 'Song' in its catalog.
+            # Fallback: strip edition suffixes from the query, and search by the
+            # lead artist only (same reasoning as the primary query above).
             from .deezer import _strip_editions
-            q_fb = f"{' '.join(t.artists)} {_strip_editions(t.name)}"
+            lead_artist = t.artists[0] if t.artists else ""
+            q_fb = f"{lead_artist} {_strip_editions(t.name)}".strip()
             if q_fb != q:
                 report(f"    [deezer] fallback search: {q_fb}")
                 hit = deezer_search(dz, q_fb, target_title=t.name, target_artists=t.artists)
