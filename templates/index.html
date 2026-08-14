@@ -212,6 +212,20 @@
   .badge.done    { border-color: var(--ok); color: var(--text-b); }
   .badge.error   { border-color: var(--err); color: var(--err); }
 
+  /* collapsible job header (click to expand/collapse the track list) */
+  .job-header { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+  .job-chevron { color: var(--text-d); font-size: 10px; width: 12px; text-align: center; transition: transform 0.2s; flex-shrink: 0; }
+  .job-chevron.open { transform: rotate(90deg); color: var(--text-b); }
+  .job-header .meta { margin-bottom: 0; flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .job-header .pname { color: var(--text-b); font-weight: 500; }
+  .job-header .url { color: var(--text-d); }
+  .results { display: flex; gap: 4px; flex-shrink: 0; }
+  .chip { font-size: 10px; padding: 1px 5px; border: 1px solid var(--border); color: var(--text-d); letter-spacing: 0.04em; }
+  .chip.ok   { border-color: var(--border-h); color: var(--text-b); }
+  .chip.warn { border-color: var(--border-h); color: var(--text); }
+  .chip.miss { border-color: var(--border-h); color: var(--text); }
+  .chip.err  { border-color: var(--border-h); color: var(--text); }
+
   /* ---- track list (job progress) ---- */
   .track-list { max-height: 400px; overflow-y: auto; margin-top: 6px; }
   .track-row { display: flex; align-items: center; gap: 6px; padding: 3px 2px; border-bottom: 1px solid var(--border); }
@@ -409,9 +423,25 @@ function ensureJobCard(j) {
   card.className = "job " + j.status;
   card.dataset.job = j.id;
 
+  // Collapsible header: chevron + badge + name + url + result chips.
+  const header = document.createElement("div");
+  header.className = "job-header";
+  header.dataset.job = j.id;
+
+  const chevEl = document.createElement("span");
+  chevEl.className = "job-chevron";
+  chevEl.textContent = "\u25b6";
+  header.appendChild(chevEl);
+
   const metaEl = document.createElement("div");
   metaEl.className = "meta";
-  card.appendChild(metaEl);
+  header.appendChild(metaEl);
+
+  const resultsEl = document.createElement("div");
+  resultsEl.className = "results";
+  header.appendChild(resultsEl);
+
+  card.appendChild(header);
 
   const listEl = document.createElement("div");
   listEl.className = "track-list";
@@ -422,13 +452,38 @@ function ensureJobCard(j) {
   summaryEl.className = "stats";
   card.appendChild(summaryEl);
 
+  // Click header to collapse/expand this card's track list.
+  header.addEventListener("click", function() {
+    const open = card.classList.toggle("open");
+    chevEl.classList.toggle("open", open);
+    header.classList.toggle("open", open);
+    listEl.style.display = open ? "" : "none";
+  });
+
   $("#jobs").appendChild(card);
   const empty = $("#jobs .empty");
   if (empty) empty.remove();
 
-  ctx = { el: card, metaEl, listEl, summaryEl };
+  ctx = { el: card, header, chevEl, metaEl, listEl, summaryEl, resultsEl, open: false };
   knownJobs[j.id] = ctx;
   return ctx;
+}
+
+function setJobOpen(ctx, open) {
+  ctx.open = open;
+  ctx.el.classList.toggle("open", open);
+  ctx.chevEl.classList.toggle("open", open);
+  ctx.header.classList.toggle("open", open);
+  ctx.listEl.style.display = open ? "" : "none";
+}
+
+// Collapse every other job card when a new job starts, so the newest stays
+// the one expanded by default.
+function collapseOthers(exceptId) {
+  for (const id in knownJobs) {
+    if (id === exceptId) continue;
+    setJobOpen(knownJobs[id], false);
+  }
 }
 
 function renderTrackRow(listEl, track, total) {
@@ -486,12 +541,16 @@ function renderTrackRow(listEl, track, total) {
 
 function updateJobCard(j) {
   const ctx = ensureJobCard(j);
-  const { el, metaEl, listEl, summaryEl } = ctx;
+  const { el, metaEl, listEl, summaryEl, resultsEl } = ctx;
 
   el.className = "job " + (j.status === "done" ? "done" : j.status === "error" ? "error" : "running");
 
   const badgeStatus = j.status === "done" ? "done" : j.status === "error" ? "error" : "running";
-  metaEl.innerHTML = '<span class="badge ' + badgeStatus + '">' + esc(j.status) + '</span> &nbsp; ' + esc(j.url);
+  // Header shows the playlist name (when known) + url; results chips render
+  // next to the name once the job completes (see below).
+  const nameHtml = j.name ? '<span class="pname">' + esc(j.name) + '</span> &nbsp; ' : "";
+  metaEl.innerHTML = '<span class="badge ' + badgeStatus + '">' + esc(j.status) + '</span> &nbsp; '
+    + nameHtml + '<span class="url">' + esc(j.url) + '</span>';
 
   const p = j.progress || {};
   const total = p.total || 0;
@@ -505,19 +564,34 @@ function updateJobCard(j) {
   // jobs keep showing their tracks -- they only vanish when the card is removed
   // (another job starts and this one scrolls out / is pruned).
   const hasRows = listEl.querySelectorAll(".track-row").length > 0;
-  listEl.style.display = (hasRows || trackArr.length || j.status === "running") ? "" : "none";
+  const shouldShow = (hasRows || trackArr.length || j.status === "running");
+  if (shouldShow && ctx.open) listEl.style.display = "";
 
   if (j.result && j.result.ok) {
     const r = j.result;
     summaryEl.className = "stats";
     summaryEl.textContent = "downloaded " + r.downloaded + " / skipped " + r.skipped + " / missed " + r.missed + " / failed " + r.failed;
+    // Also surface the result breakdown as chips in the header.
+    resultsEl.innerHTML = resultChips(r);
   } else if (j.result && j.result.error) {
     summaryEl.className = "error-summary";
     summaryEl.textContent = j.result.error;
+    resultsEl.innerHTML = "";
   } else {
     summaryEl.className = "stats";
     summaryEl.textContent = "";
+    resultsEl.innerHTML = "";
   }
+}
+
+function resultChips(r) {
+  const chip = function(n, label, cls) {
+    return '<span class="chip ' + cls + '">' + label + ' ' + n + '</span>';
+  };
+  return chip(r.downloaded || 0, "dl", "ok")
+    + chip(r.skipped || 0, "sk", "warn")
+    + chip(r.missed || 0, "mi", "miss")
+    + chip(r.failed || 0, "fa", "err");
 }
 
 function syncJobs(jobs) {
@@ -590,7 +664,12 @@ function applyTrackEvent(jobId, type, d) {
   const ctx = knownJobs[jobId];
   if (!ctx) return;
   if (type === "tracks") {
-    ctx.listEl.style.display = "";
+    // This job has just started actively downloading (the TRACKS event is
+    // emitted once, up front, when run_playlist begins). Focus it: collapse
+    // the others and uncollapse this one, so the job that's actually pulling
+    // FLACs is the one you're watching -- not a queued job created later.
+    collapseOthers(jobId);
+    setJobOpen(ctx, true);
     for (let i = 0; i < d.items.length; i++) {
       const t = { pos: d.items[i].pos, name: d.items[i].name, status: "pending", pct: 0 };
       renderTrackRow(ctx.listEl, t, d.total);
@@ -784,7 +863,9 @@ $("#go").addEventListener("click", async () => {
     $("#url").value = "";
     // Ensure the job card exists, then open SSE for live progress
     var ctx = ensureJobCard({ id: r.job_id, url: url, user: getUser(), status: "running" });
-    ctx.metaEl.innerHTML = '<span class="badge running">running</span> &nbsp; ' + esc(url);
+    updateJobCard({ id: r.job_id, url: url, user: getUser(), status: "running" });
+    collapseOthers(r.job_id);
+    setJobOpen(ctx, true);
     // One-time fetch of the list view (lightweight)
     refreshJobs();
   } catch (e) {
@@ -832,7 +913,9 @@ async function startUpdate(url) {
     const r = await postDownload(url);
     $("#msg").textContent = "job " + r.job_id + " started (update)";
     var ctx = ensureJobCard({ id: r.job_id, url: url, user: getUser(), status: "running" });
-    ctx.metaEl.innerHTML = '<span class="badge running">running</span> &nbsp; ' + esc(url);
+    updateJobCard({ id: r.job_id, url: url, user: getUser(), status: "running" });
+    collapseOthers(r.job_id);
+    setJobOpen(ctx, true);
     refreshJobs();
   } catch (e) {
     $("#msg").textContent = "error: " + e.message;
@@ -857,8 +940,12 @@ tick();
   es.addEventListener("job_created", function(e) {
     const d = JSON.parse(e.data);
     const j = d.job;
-    ensureJobCard({ id: j.id, url: j.url, user: j.user, status: j.status || "running" });
+    ensureJobCard({ id: j.id, url: j.url, user: j.user, name: j.name, status: j.status || "running" });
     updateJobCard(j);
+    // NOTE: do NOT auto-open/collapse here. A freshly created job is usually
+    // still queued behind the DZ_LOCK, not actively downloading -- opening it
+    // would collapse the job that is *actually* running. The active job gets
+    // focused when its TRACKS event arrives (see applyTrackEvent / "tracks").
   });
   // Per-track progress is relayed by the backend for EVERY job; apply to its card.
   ["tracks", "start", "pct", "done"].forEach(function(type) {

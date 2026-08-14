@@ -195,7 +195,7 @@ JOB_FEED_LOCK = threading.Lock()
 def _job_public(job):
     """JSON-friendly snapshot of a Job for the shared feed."""
     return {
-        "id": job.id, "url": job.url, "user": job.user,
+        "id": job.id, "url": job.url, "user": job.user, "name": job.name,
         "status": job.status,
         "started_at": job.started_at, "finished_at": job.finished_at,
         # Include progress so a finished job's track rows survive the 10s poll
@@ -311,6 +311,7 @@ def _run_job(job_id, url, user):
             result = {"ok": False, "error": f"run_playlist raised: {e}", "traceback": tb}
     job.result = result
     job.status = DownloadStatus.OK if result.get("ok") else DownloadStatus.ERROR
+    job.name = result.get("name") or ""
     job.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     # Signal SSE subscribers that the job is finished.
     # Convert Path to str so the event is JSON-serializable.

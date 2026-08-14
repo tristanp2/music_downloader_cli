@@ -35,6 +35,7 @@ class Job:
     id: str
     url: str
     user: str
+    name: str = ""                          # playlist/album name (from run_playlist result)
     status: str = "running"                 # running|done|error
     log: list[str] = field(default_factory=list)
     result: Optional[dict] = None           # run_playlist() result dict
