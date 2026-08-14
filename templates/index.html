@@ -482,6 +482,7 @@ function ensureJobCard(j) {
 
   const urlEl = document.createElement("div");
   urlEl.className = "job-url";
+  urlEl.style.display = "none";
   card.appendChild(urlEl);
 
   const listEl = document.createElement("div");
@@ -489,12 +490,9 @@ function ensureJobCard(j) {
   listEl.style.display = "none";
   card.appendChild(listEl);
 
-  // Click header to collapse/expand this card's track list.
   header.addEventListener("click", function() {
     const open = card.classList.toggle("open");
-    chevEl.classList.toggle("open", open);
-    header.classList.toggle("open", open);
-    listEl.style.display = open ? "" : "none";
+    setJobOpen(knownJobs[j.id], open);
   });
 
   $("#jobs").appendChild(card);
@@ -513,6 +511,7 @@ function setJobOpen(ctx, open) {
   ctx.chevEl.classList.toggle("open", open);
   ctx.header.classList.toggle("open", open);
   ctx.listEl.style.display = open ? "" : "none";
+  ctx.urlEl.style.display = open ? "" : "none";
 }
 
 // Collapse every other job card when a new job starts, so the newest stays
@@ -585,8 +584,6 @@ function updateJobCard(j) {
   el.className = "job " + (j.status === "done" ? "done" : j.status === "error" ? "error" : "running");
 
   const badgeStatus = j.status === "done" ? "done" : j.status === "error" ? "error" : "running";
-  // Title bar: badge + playlist name only. The URL moves to the body (above the
-  // tracks). Result chips render in the title bar once the job completes.
   const nameHtml = j.name ? '<span class="pname">' + esc(j.name) + '</span> &nbsp; ' : "";
   metaEl.innerHTML = '<span class="badge ' + badgeStatus + '">' + esc(j.status) + '</span> &nbsp; ' + nameHtml;
 
