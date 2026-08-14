@@ -427,7 +427,11 @@ def enqueue_sync_all():
         folder = pl.get("folder")
         if not url or not folder:
             continue
-        user = _derive_user_for_folder(WORK_DIR_BASE / folder)
+        # Prefer the user the playlist was originally downloaded under
+        # (encoded in its filesystem location WORK_DIR_BASE/<user>/<folder>).
+        # Fall back to deriving from the folder path in case the "user" field
+        # is missing (e.g. older/foreign meta files).
+        user = pl.get("user") or _derive_user_for_folder(WORK_DIR_BASE / folder)
         jobs.append(_start_job(url, user))
     return {"queued": len(jobs), "jobs": jobs, "skipped": None}
 
