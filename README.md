@@ -36,7 +36,7 @@ pip install -r requirements.txt
 After activating, `python` resolves to the venv interpreter, which has all the
 third-party packages.
 
-## Configure secrets (all gitignored, never committed)
+## Configure secrets
 
 1. **Deezer token** — log into Deezer in your browser, then copy the `arl`
    cookie value into `deezer.arl` (one line). On each run the server copies it
