@@ -202,7 +202,30 @@ def _job_public(job):
         # (GET /jobs now also returns it) and stay visible until the card cap
         # pushes them out (i.e. only when another job starts and this one scrolls out).
         "progress": asdict(job.progress),
+        # Result carries the downloaded/skipped/missed/failed breakdown so the
+        # frontend can render stats chips in the job header without expanding.
+        "result": _jsonable(job.result),
     }
+
+
+def _jsonable(v):
+    """Recursively coerce non-JSON types (notably pathlib.Path / WindowsPath)
+    to str. Guarantees nothing in a serialized payload can raise
+    'Object of type WindowsPath is not JSON serializable' en route to the frontend."""
+    if isinstance(v, Path):
+        return str(v)
+    if isinstance(v, dict):
+        return {k: _jsonable(val) for k, val in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    return v
+
+
+def _dumps(obj):
+    """json.dumps with a Path-safe fallback. Used by every SSE generator so that
+    ANY event carrying a filesystem path (e.g. a download result's folder) is
+    serialized as a string instead of crashing the stream mid-job."""
+    return json.dumps(obj, default=_jsonable)
 
 
 def _push_job_feed(event):
@@ -553,7 +576,7 @@ async def job_feed_stream(request: Request):
                     continue
                 if evt is None:
                     return
-                yield f"event: {evt['type'].value}\ndata: {json.dumps(evt)}\n\n"
+                yield f"event: {evt['type'].value}\ndata: {_dumps(evt)}\n\n"
         except asyncio.CancelledError:
             pass
         finally:
@@ -573,46 +596,9 @@ def job_status(job_id: str):
     return {
         "id": j.id, "url": j.url, "status": j.status,
         "started_at": j.started_at, "finished_at": j.finished_at,
-        "log": j.log[-200:], "result": j.result,
+        "log": j.log[-200:], "result": _jsonable(j.result),
         "progress": asdict(j.progress),
     }
-
-
-@app.get("/jobs/{job_id}/events")
-async def job_events(job_id: str):
-    """SSE stream: pushes download progress events to the browser in real time."""
-    with JOBS_LOCK:
-        if job_id not in JOBS:
-            raise HTTPException(status_code=404, detail="no such job")
-
-    queue = asyncio.Queue()
-    with EVENT_SUBS_LOCK:
-        EVENT_SUBS.setdefault(job_id, []).append(queue)
-
-    async def event_stream():
-        try:
-            while True:
-                try:
-                    evt = await asyncio.wait_for(queue.get(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    # Same as the shared feed: uvicorn closes the connection
-                    # before the lifespan shutdown runs, so wake up periodically
-                    # and break if the client went away (Ctrl-C / tab close).
-                    if await request.is_disconnected():
-                        break
-                    continue
-                if evt is None:
-                    return
-                yield f"event: {evt['type'].value}\ndata: {json.dumps(evt)}\n\n"
-        except asyncio.CancelledError:
-            pass
-        finally:
-            with EVENT_SUBS_LOCK:
-                subs = EVENT_SUBS.get(job_id, [])
-                if queue in subs:
-                    subs.remove(queue)
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/users")

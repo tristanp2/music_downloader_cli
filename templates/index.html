@@ -182,9 +182,6 @@
     color: var(--bg);
   }
 
-  .stats { font-size: 11px; color: var(--text-d); margin-top: 4px; }
-  .error-summary { font-size: 11px; color: var(--err); margin-top: 4px; }
-
   .empty { color: var(--text-d); font-size: 11px; }
 
   /* ---- job cards ---- */
@@ -218,7 +215,7 @@
   .job-chevron.open { transform: rotate(90deg); color: var(--text-b); }
   .job-header .meta { margin-bottom: 0; flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .job-header .pname { color: var(--text-b); font-weight: 500; }
-  .job-header .url { color: var(--text-d); }
+  .job-url { color: var(--text-d); font-size: 10px; margin: 2px 0 4px 20px; word-break: break-all; }
   .results { display: flex; gap: 4px; flex-shrink: 0; }
   .chip { font-size: 10px; padding: 1px 5px; border: 1px solid var(--border); color: var(--text-d); letter-spacing: 0.04em; }
   .chip.ok   { border-color: var(--border-h); color: var(--text-b); }
@@ -443,14 +440,14 @@ function ensureJobCard(j) {
 
   card.appendChild(header);
 
+  const urlEl = document.createElement("div");
+  urlEl.className = "job-url";
+  card.appendChild(urlEl);
+
   const listEl = document.createElement("div");
   listEl.className = "track-list";
   listEl.style.display = "none";
   card.appendChild(listEl);
-
-  const summaryEl = document.createElement("div");
-  summaryEl.className = "stats";
-  card.appendChild(summaryEl);
 
   // Click header to collapse/expand this card's track list.
   header.addEventListener("click", function() {
@@ -464,7 +461,8 @@ function ensureJobCard(j) {
   const empty = $("#jobs .empty");
   if (empty) empty.remove();
 
-  ctx = { el: card, header, chevEl, metaEl, listEl, summaryEl, resultsEl, open: false };
+  ctx = { el: card, header, chevEl, metaEl, listEl, urlEl, resultsEl, open: false,
+          counts: { downloaded: 0, skipped: 0, missed: 0, failed: 0 } };
   knownJobs[j.id] = ctx;
   return ctx;
 }
@@ -492,6 +490,7 @@ function renderTrackRow(listEl, track, total) {
     row = document.createElement("div");
     row.className = "track-row";
     row.dataset.pos = track.pos;
+    row.dataset.status = track.status;
 
     const posEl = document.createElement("span");
     posEl.className = "pos";
@@ -541,16 +540,18 @@ function renderTrackRow(listEl, track, total) {
 
 function updateJobCard(j) {
   const ctx = ensureJobCard(j);
-  const { el, metaEl, listEl, summaryEl, resultsEl } = ctx;
+  const { el, metaEl, listEl, urlEl, resultsEl } = ctx;
 
   el.className = "job " + (j.status === "done" ? "done" : j.status === "error" ? "error" : "running");
 
   const badgeStatus = j.status === "done" ? "done" : j.status === "error" ? "error" : "running";
-  // Header shows the playlist name (when known) + url; results chips render
-  // next to the name once the job completes (see below).
+  // Title bar: badge + playlist name only. The URL moves to the body (above the
+  // tracks). Result chips render in the title bar once the job completes.
   const nameHtml = j.name ? '<span class="pname">' + esc(j.name) + '</span> &nbsp; ' : "";
-  metaEl.innerHTML = '<span class="badge ' + badgeStatus + '">' + esc(j.status) + '</span> &nbsp; '
-    + nameHtml + '<span class="url">' + esc(j.url) + '</span>';
+  metaEl.innerHTML = '<span class="badge ' + badgeStatus + '">' + esc(j.status) + '</span> &nbsp; ' + nameHtml;
+
+  // URL shown in the body, above the track list.
+  urlEl.textContent = j.url;
 
   const p = j.progress || {};
   const total = p.total || 0;
@@ -567,21 +568,19 @@ function updateJobCard(j) {
   const shouldShow = (hasRows || trackArr.length || j.status === "running");
   if (shouldShow && ctx.open) listEl.style.display = "";
 
+  // Result chips in the title bar.
   if (j.result && j.result.ok) {
-    const r = j.result;
-    summaryEl.className = "stats";
-    summaryEl.textContent = "downloaded " + r.downloaded + " / skipped " + r.skipped + " / missed " + r.missed + " / failed " + r.failed;
-    // Also surface the result breakdown as chips in the header.
-    resultsEl.innerHTML = resultChips(r);
+    paintChips(resultsEl, j.result);
   } else if (j.result && j.result.error) {
-    summaryEl.className = "error-summary";
-    summaryEl.textContent = j.result.error;
-    resultsEl.innerHTML = "";
+    resultsEl.innerHTML = '<span class="chip err">error</span>';
   } else {
-    summaryEl.className = "stats";
-    summaryEl.textContent = "";
-    resultsEl.innerHTML = "";
+    // Live phase: paint whatever the in-memory tally currently holds (the SSE
+    // done events increment it). Empty until the first track finishes.
+    paintChips(resultsEl, ctx.counts);
   }
+}
+function paintChips(resultsEl, counts) {
+  resultsEl.innerHTML = resultChips(counts)
 }
 
 function resultChips(r) {
@@ -663,6 +662,7 @@ async function refreshJobs() {
 function applyTrackEvent(jobId, type, d) {
   const ctx = knownJobs[jobId];
   if (!ctx) return;
+
   if (type === "tracks") {
     // This job has just started actively downloading (the TRACKS event is
     // emitted once, up front, when run_playlist begins). Focus it: collapse
@@ -670,10 +670,15 @@ function applyTrackEvent(jobId, type, d) {
     // FLACs is the one you're watching -- not a queued job created later.
     collapseOthers(jobId);
     setJobOpen(ctx, true);
+    // reset the in-memory tally for this job (no DOM traversal needed)
+    ctx.counts = { downloaded: 0, skipped: 0, missed: 0, failed: 0 };
     for (let i = 0; i < d.items.length; i++) {
       const t = { pos: d.items[i].pos, name: d.items[i].name, status: "pending", pct: 0 };
       renderTrackRow(ctx.listEl, t, d.total);
     }
+
+    // paint the (zeroed) tallies in the header
+    paintChips(ctx.resultsEl, ctx.counts);
   } else if (type === "start") {
     const row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
     if (row) {
@@ -691,9 +696,14 @@ function applyTrackEvent(jobId, type, d) {
     if (statusEl) { statusEl.className = "track-status downloading"; statusEl.textContent = icons.downloading; }
   } else if (type === "done") {
     const row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
-    if (!row) return;
-    const existingName = row.querySelector(".track-name").textContent;
-    renderTrackRow(ctx.listEl, { pos: d.pos, name: existingName, status: d.status, pct: d.pct }, ctx.listEl.querySelectorAll(".track-row").length);
+    if (row) {
+      const existingName = row.querySelector(".track-name").textContent;
+      renderTrackRow(ctx.listEl, { pos: d.pos, name: existingName, status: d.status, pct: d.pct }, ctx.listEl.querySelectorAll(".track-row").length);
+    }
+    // bump the in-memory tally and repaint -- independent of the DOM, so a
+    // missing row can never stop the chips from ticking up.
+    if (d.status in ctx.counts) ctx.counts[d.status]++;
+    paintChips(ctx.resultsEl, ctx.counts);
   }
 }
 
@@ -922,13 +932,6 @@ async function startUpdate(url) {
   }
 }
 
-async function tick() {
-  await refreshHealth();
-  await refreshJobs();
-  await refreshPlaylists();
-}
-tick();
-
 // Shared job-feed SSE: ONE connection for this tab, opened at page load. Carries
 // ONE shared SSE per tab. Carries job_created / job_done / per-track progress
 // for EVERY job (any user), so a job your roommate queues -- and its live track
@@ -997,6 +1000,10 @@ tick();
       });
   }, 10000);
 })();
+
+refreshHealth();
+refreshJobs();
+refreshPlaylists();
 </script>
 <div id="serverOverlay" class="server-overlay">
   <div class="sad">:(</div>
