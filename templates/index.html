@@ -246,6 +246,7 @@
   .job-chevron.open { transform: rotate(90deg); color: var(--text-b); }
   .job-header .meta { margin-bottom: 0; flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .job-header .pname { color: var(--text-b); font-weight: 500; }
+  .job-header .clock { color: var(--text-d); font-size: 10px; letter-spacing: 0.04em; font-variant-numeric: tabular-nums; }
   .job-url { color: var(--text-d); font-size: 10px; margin: 2px 0 4px 20px; word-break: break-all; }
   .results { display: flex; gap: 4px; flex-shrink: 0; }
   .chip { font-size: 10px; padding: 1px 5px; border: 1px solid var(--border); color: var(--text-d); letter-spacing: 0.04em; }
@@ -452,6 +453,12 @@ function esc(s) {
   return s.replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
 }
 
+// Timestamps arrive as "YYYY-MM-DDTHH:MM:SS"; show the clock portion only.
+function fmtClock(ts) {
+  if (!ts) return "—";
+  return ts.length >= 19 ? ts.slice(11, 19) : ts;
+}
+
 function ensureJobCard(j) {
   let ctx = knownJobs[j.id];
   if (ctx) return ctx;
@@ -585,7 +592,9 @@ function updateJobCard(j) {
 
   const badgeStatus = j.status === "done" ? "done" : j.status === "error" ? "error" : "running";
   const nameHtml = j.name ? '<span class="pname">' + esc(j.name) + '</span> &nbsp; ' : "";
-  metaEl.innerHTML = '<span class="badge ' + badgeStatus + '">' + esc(j.status) + '</span> &nbsp; ' + nameHtml;
+  metaEl.innerHTML = '<span class="badge ' + badgeStatus + '">' + esc(j.status) + '</span> &nbsp; ' + nameHtml
+    + '<span class="clock" title="started">st: ' + fmtClock(j.started_at) + '</span>'
+    + '<span class="clock" title="finished">et: ' + fmtClock(j.finished_at) + '</span>';
 
   // URL shown in the body, above the track list.
   urlEl.textContent = j.url;
@@ -1034,6 +1043,12 @@ async function startUpdate(url) {
     const d = JSON.parse(e.data);
     updateJobCard(d.job);
     refreshPlaylists();
+  });
+  // Download actually began (after the DZ_LOCK wait): re-render so the start
+  // time shows the real download-start, not the enqueue/sync time.
+  es.addEventListener("job_started", function(e) {
+    const d = JSON.parse(e.data);
+    if (d.job) updateJobCard(d.job);
   });
   es.onopen = function() {
     setBadge(true);

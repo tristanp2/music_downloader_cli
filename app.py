@@ -325,6 +325,13 @@ def _run_job(job_id, url, user):
                 if pos in tracks:
                     tracks[pos].status = e["status"]
                     tracks[pos].pct = e["pct"]
+        # The download actually begins here (after waiting its turn behind
+        # DZ_LOCK). Stamp the true start time and broadcast it so the frontend
+        # shows this, not the enqueue/sync time (JOB_CREATED already fired with
+        # the placeholder). JOB_DONE later carries the same value for finished jobs.
+        job.started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        _push_event(job_id, {"type": JobEventType.JOB_STARTED, "started_at": job.started_at})
+        _push_job_feed({"type": JobEventType.JOB_STARTED, "job": _job_public(job)})
         try:
             result = run_playlist(url, DZ, SETTINGS, work_dir=work_dir,
                                   on_progress=on_progress, on_event=on_event)
@@ -398,7 +405,6 @@ def _start_job(url, user, name=""):
             url=url,
             user=user,
             name=name,
-            started_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
         )
     # Broadcast to the shared job-feed so every connected tab sees the new job
     # immediately (not just the creator's per-job SSE, and not waiting on a poll).
