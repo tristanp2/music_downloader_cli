@@ -992,11 +992,25 @@ async function startUpdate(url) {
 
 // Shared job-feed SSE: ONE connection for this tab, opened at page load. Carries
 // ONE shared SSE per tab. Carries job_created / job_done / per-track progress
-// for EVERY job (any user), so a job your roommate queues -- and its live track
-// progress -- appears on your screen in real time. On a real disconnect the
-// heartbeat poll reloads the page, which re-opens this connection, so onerror
-// needs no reconnect logic of its own.
+// The shared job-feed SSE is ALSO our liveness signal: a live connection means
+// the server is up and serving. onopen => healthy; onerror => down. EventSource
+// auto-reconnects on its own, so we only drive the badge + overlay here and
+// reload once on recovery to re-sync the full job snapshot.
 (function jobFeed() {
+  var wasDown = false;
+  function setBadge(up) {
+    var h = $("#health");
+    if (!h) return;
+    h.textContent = up ? "up" : "server down";
+    h.className = up ? "ok" : "bad";
+  }
+  function showOverlay(on) {
+    var ov = document.getElementById("serverOverlay");
+    if (ov) ov.classList.toggle("show", on);
+    // disable the user dropdown while disconnected so no requests are sent
+    var sel = document.getElementById("user-select");
+    if (sel) sel.disabled = on;
+  }
   const es = new EventSource("/jobs/stream");
   es.addEventListener("job_created", function(e) {
     const d = JSON.parse(e.data);
@@ -1021,42 +1035,17 @@ async function startUpdate(url) {
     updateJobCard(d.job);
     refreshPlaylists();
   });
-  es.onerror = function() { /* auto-reconnects; heartbeat reloads the page on real outage */ };
-})();
-
-/* ---- heartbeat: check server every 10s, show overlay when down, reload on recovery ---- */
-(function heartbeat() {
-  var wasDown = false;
-  function showOverlay(on) {
-    var ov = document.getElementById("serverOverlay");
-    if (ov) ov.classList.toggle("show", on);
-    // disable the user dropdown while disconnected so no requests are sent
-    var sel = document.getElementById("user-select");
-    if (sel) sel.disabled = on;
-  }
-  setInterval(function() {
-    fetch("/health")
-      .then(function(r) {
-        if (r.ok) {
-          if (wasDown) {
-            wasDown = false;
-            showOverlay(false);
-            location.reload();
-          }
-        } else {
-          wasDown = true;
-          showOverlay(true);
-          $("#health").textContent = "degraded";
-          $("#health").className = "bad";
-        }
-      })
-      .catch(function() {
-        wasDown = true;
-        showOverlay(true);
-        $("#health").textContent = "server down";
-        $("#health").className = "bad";
-      });
-  }, 10000);
+  es.onopen = function() {
+    setBadge(true);
+    showOverlay(false);
+    // Reconnect after an outage: reload once to re-fetch the job list / state.
+    if (wasDown) { wasDown = false; location.reload(); }
+  };
+  es.onerror = function() {
+    wasDown = true;
+    setBadge(false);
+    showOverlay(true);
+  };
 })();
 
 refreshHealth();
