@@ -10,6 +10,7 @@ Public API (re-exported here for convenience):
 """
 import logging
 import os
+import asyncio
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -47,6 +48,32 @@ class _HealthAccessFilter(logging.Filter):
 
     def filter(self, record):
         return "/health" not in record.getMessage()
+
+
+class _ShutdownCancelFilter(logging.Filter):
+    """Drop the noisy traceback uvicorn emits on a clean Ctrl-C shutdown.
+
+    When the server is stopped with in-flight requests/SSE, uvicorn's run_asgi
+    (uvicorn/protocols/http/h11_impl.py) catches the BaseException --
+    typically asyncio.CancelledError -- and logs it via the uvicorn.error
+    logger as "Exception in ASGI application" with exc_info set. That is
+    expected shutdown behavior, not a bug, but it dumps a full traceback into
+    the log every restart. This filter removes ONLY that exact record; any
+    other uvicorn.error line (a genuine 500, a real ASGI exception) still
+    passes through untouched.
+    """
+
+    def filter(self, record):
+        msg = record.getMessage()
+        if "Exception in ASGI application" not in msg:
+            return True
+        # exc_info is a (type, value, traceback) tuple when set by logger.error
+        exc_info = getattr(record, "exc_info", None)
+        if exc_info:
+            exc_type = exc_info[0]
+            if isinstance(exc_type, type) and issubclass(exc_type, asyncio.CancelledError):
+                return False
+        return True
 
 # ---------------------------------------------------------------------------
 # Our logger: console + rotating file.  Uvicorn's loggers are wired into this
@@ -87,6 +114,10 @@ def attach_uvicorn_loggers():
         uv.addHandler(_fh)
         uv.setLevel(logging.DEBUG)
         uv.propagate = False
+    # uvicorn.error also gets the shutdown-cancel filter so the Ctrl-C
+    # "Exception in ASGI application" traceback is suppressed (still logs
+    # genuine 500s / real exceptions).
+    _logging.getLogger("uvicorn.error").addFilter(_ShutdownCancelFilter())
     # access logging: console + file for every request, EXCEPT /health which
     # is dropped entirely by _HealthAccessFilter (nowhere -- not console, not file).
     uv = _logging.getLogger("uvicorn.access")
