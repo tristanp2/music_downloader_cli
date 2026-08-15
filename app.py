@@ -87,6 +87,7 @@ async def lifespan(app):
     # (default 12h). 0 or negative in settings.conf disables it.
     _sync_interval = float((read_conf(CONF_SETTINGS).get("sync_interval_hours") or "12") or 12)
     start_scheduler(_sync_interval)
+    start_liveness_log(60)
     try:
         yield
     finally:
@@ -514,6 +515,31 @@ def start_scheduler(interval_hours):
     t = threading.Thread(target=_loop, name="sync-scheduler", daemon=True)
     t.start()
     log.info("[scheduler] started, interval = %s h", interval_hours)
+
+
+def start_liveness_log(interval_seconds=60):
+    """Background heartbeat: every interval, emit a one-line [alive] log so the
+    file carries evidence the server is up + how many clients are connected.
+
+    Reuses the shared job-feed SSE subscriber list (one subscriber == one open
+    browser tab) for the connected-client count, and JOBS for active jobs.
+    No new machinery -- same daemon-thread + time.sleep pattern as start_scheduler.
+    """
+    def _loop():
+        while True:
+            time.sleep(interval_seconds)
+            try:
+                with JOB_FEED_LOCK:
+                    clients = len(JOB_FEED_SUBS)
+                with JOBS_LOCK:
+                    active = sum(1 for j in JOBS.values() if j.status == "running")
+                log.info("[alive] server up -- %d connected client(s), %d active job(s)",
+                         clients, active)
+            except Exception as e:
+                log.error("[alive] liveness log failed: %s", e)
+    t = threading.Thread(target=_loop, name="liveness-log", daemon=True)
+    t.start()
+    log.info("[alive] liveness log started, interval = %s s", interval_seconds)
 
 
 @app.post("/download")

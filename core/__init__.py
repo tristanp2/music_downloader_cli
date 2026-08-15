@@ -39,6 +39,15 @@ def _log_int(key_conf, key_env, default):
 MAX_BYTES = _log_int("log_max_bytes", "MUSIC_DOWNLOADER_LOG_MAX_BYTES", 5 * 1024 * 1024)
 BACKUPS = _log_int("log_backups", "MUSIC_DOWNLOADER_LOG_BACKUPS", 5)
 
+
+class _HealthAccessFilter(logging.Filter):
+    """Drop uvicorn.access lines for the 10s /health heartbeat poll so they
+    don't clutter the log. Every other request still logs normally.
+    """
+
+    def filter(self, record):
+        return "/health" not in record.getMessage()
+
 # ---------------------------------------------------------------------------
 # Our logger: console + rotating file.  Uvicorn's loggers are wired into this
 # at server startup (app.py) via attach_uvicorn_loggers().
@@ -65,10 +74,10 @@ log = logger
 def attach_uvicorn_loggers():
     """Called at server startup: replace uvicorn's log handlers with ours.
 
-    uvicorn / uvicorn.error get console + file handlers. uvicorn.access
-    (routine request logging, incl. the 10s /health heartbeat poll) gets
-    console ONLY -- it is suppressed from the on-disk log so the file stays
-    readable. Errors still reach the file via uvicorn.error.
+    uvicorn / uvicorn.error and uvicorn.access get console + file handlers, so
+    every request (except /health) is recorded on disk. A _HealthAccessFilter
+    drops /health entirely -- the 10s heartbeat poll is logged nowhere.
+    Errors still reach the file via uvicorn.error.
     """
     import logging as _logging
     for name in ("uvicorn", "uvicorn.error"):
@@ -78,12 +87,15 @@ def attach_uvicorn_loggers():
         uv.addHandler(_fh)
         uv.setLevel(logging.DEBUG)
         uv.propagate = False
-    # access logging: console-only, NOT the file (see docstring)
+    # access logging: console + file for every request, EXCEPT /health which
+    # is dropped entirely by _HealthAccessFilter (nowhere -- not console, not file).
     uv = _logging.getLogger("uvicorn.access")
     uv.handlers = []
     uv.addHandler(_console)
+    uv.addHandler(_fh)
     uv.setLevel(logging.INFO)
     uv.propagate = False
+    uv.addFilter(_HealthAccessFilter())
 
 
 def _log_from_prints(logger_ref):
