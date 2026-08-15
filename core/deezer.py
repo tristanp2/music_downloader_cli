@@ -151,6 +151,14 @@ def deezer_search(dz, query, target_title=None, target_artists=None):
             if title_sim < 0.5:
                 return 0.0
         artist_sim = _title_similarity(want_artist, t_artist) if want_artist and t_artist else 0
+        # A genuinely different artist (near-zero token overlap) must NOT be
+        # papered over by a loose title match. Deezer's artist metadata is
+        # noisy, so we still reward artist agreement as a bonus -- but if the
+        # two artists share essentially nothing, a half-wrong title (e.g.
+        # "Basement" vs "Basement Land" by a different artist) is rejected
+        # unless the title is near-exact. This stops cross-artist false matches.
+        if artist_sim < 0.2:
+            return title_sim if title_sim >= 0.9 else 0.0
         # title contributes 0-1, artist contributes up to 0.5
         return title_sim + (0.5 if artist_sim >= 0.5 else 0)
 
