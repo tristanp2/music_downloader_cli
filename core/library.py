@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 
 from mutagen.flac import FLAC
+from mutagen.easyid3 import EasyID3
+from mutagen import File as mutagen_file
 
 from .track import Track
 
@@ -31,32 +33,38 @@ def _core_artist_title(stem):
     return "", stem
 
 
-def _is_complete_flac(path):
-    """Return True only if the file is a valid FLAC whose core metadata
-    (TITLE + ALBUM, the fields Windows Explorer shows in its columns) is
-    actually populated.
+def _is_complete_audio(path):
+    """Return True only if the file is a valid audio file (FLAC or MP3)
+    whose core metadata (TITLE + ALBUM, the fields Windows Explorer shows in
+    its columns) is actually populated.
 
-    deemix writes a Vorbis-comment block up front, so a partial/interrupted
-    download still parses and may even carry a placeholder tag -- but its
-    TITLE/ALBUM/ARTIST are blank. That is exactly what makes Explorer show
-    empty columns for a half-written file. Requiring real TITLE + ALBUM
-    values is therefore the reliable "is this download finished" signal.
+    Container-agnostic: uses mutagen.File to auto-detect FLAC vs MP3, so an
+    MP3 fallback download is treated the same as a FLAC -- a complete MP3 is
+    recognized as present and skipped on re-sync, not re-downloaded.
+
+    deemix writes a tag block up front, so a partial/interrupted download
+    still parses and may even carry a placeholder tag -- but its TITLE/ALBUM
+    are blank. Requiring real TITLE + ALBUM values is the reliable "is this
+    download finished" signal. Vorbis (FLAC) keys are TITLE/ALBUM; ID3 (MP3)
+    keys are TIT2/TALB -- check both.
     """
     if not path.is_file():
         return False
     try:
-        audio = FLAC(str(path))
-        if not audio.tags:
+        audio = mutagen_file(str(path))
+        if audio is None:
             return False
-        # Case-insensitive lookup: mutagen stores both uppercase (Vorbis
-        # spec) and lowercase aliases, but be safe about it.
-        def has(field):
-            for key in (field, field.lower(), field.upper()):
-                v = audio.tags.get(key)
-                if v:
+        tags = audio.tags
+        if not tags:
+            return False
+
+        def has(*keys):
+            for k in keys:
+                if tags.get(k):
                     return True
             return False
-        return has("TITLE") and has("ALBUM")
+
+        return has("TITLE", "title", "TIT2") and has("ALBUM", "album", "TALB")
     except Exception:
         return False
 
@@ -125,17 +133,17 @@ def _same_recording_with_edition(a, b):
 
 
 def find_existing_track(out_dir, artists, title):
-    """Return an existing COMPLETE FLAC in out_dir matching the given track,
-    or None.
+    """Return an existing COMPLETE audio file (FLAC or MP3) in out_dir
+    matching the given track, or None.
 
-    A file is considered a match only if it is a valid, fully-tagged FLAC
-    (see _is_complete_flac) -- partial/interrupted downloads are ignored so
+    A file is considered a match only if it is valid and fully tagged
+    (see _is_complete_audio) -- partial/interrupted downloads are ignored so
     they get re-fetched instead of being treated as already present.
     """
     if not _normalize(title):
         return None
-    for f in out_dir.glob("*.flac"):
-        if not _is_complete_flac(f):
+    for f in (*out_dir.glob("*.flac"), *out_dir.glob("*.mp3")):
+        if not _is_complete_audio(f):
             continue
         if _title_matches(f, title):
             return f
@@ -143,8 +151,8 @@ def find_existing_track(out_dir, artists, title):
 
 
 def find_partial_track(out_dir, artists, title):
-    """Return a PARTIAL (incomplete) FLAC in out_dir matching the given track,
-    or None.
+    """Return a PARTIAL (incomplete) audio file (FLAC or MP3) in out_dir
+    matching the given track, or None.
 
     Used to clean up interrupted downloads before re-downloading: deemix will
     see a same-named file on disk and skip the write (treating it as
@@ -153,8 +161,8 @@ def find_partial_track(out_dir, artists, title):
     """
     if not _normalize(title):
         return None
-    for f in out_dir.glob("*.flac"):
-        if _is_complete_flac(f):
+    for f in (*out_dir.glob("*.flac"), *out_dir.glob("*.mp3")):
+        if _is_complete_audio(f):
             continue
         if _title_matches(f, title):
             return f
@@ -166,22 +174,21 @@ def find_partial_track(out_dir, artists, title):
 # ---------------------------------------------------------------------------
 
 def tag_and_rename(flac_path, position, total):
-    """Set the Vorbis TRACKNUMBER comment to the Spotify playlist position
-    (NN) and ensure the filename is the bare core name.
+    """Set the playlist position (NN) in the file's tag and ensure the
+    filename is the bare core name, preserving the real audio extension.
 
-    FLAC uses Vorbis comments, NOT the ID3 'TRCK' key -- Windows Explorer's
-    '#' column and the Denon Prime 4 both read TRACKNUMBER, so we write that
-    for playlist ordering. The position is carried in the tag, not the
-    filename, so the on-disk name stays clean (e.g. 'Eddie C - X.flac').
+    FLAC uses Vorbis comments (TRACKNUMBER); MP3 uses ID3 (TRCK). Windows
+    Explorer's '#' column and the Denon Prime 4 both read these for playlist
+    ordering. The position lives in the tag, not the filename, so the on-disk
+    name stays clean (e.g. 'Eddie C - X.flac' or 'Eddie C - X.mp3'). The
+    extension is taken from the file itself -- an MP3 must stay .mp3.
     """
     core = flac_path.stem
-    target_name = f"{core}.flac"
+    target_name = f"{core}{flac_path.suffix}"
     # already correctly named? just ensure the tag is right
     if flac_path.name == target_name:
         try:
-            audio = FLAC(str(flac_path))
-            audio["TRACKNUMBER"] = f"{position:0{len(str(total))}d}"
-            audio.save()
+            _write_position(flac_path, position, total)
         except Exception:
             pass
         return flac_path
@@ -199,12 +206,23 @@ def tag_and_rename(flac_path, position, total):
         return new_path
     flac_path.rename(new_path)
     try:
-        audio = FLAC(str(new_path))
-        audio["TRACKNUMBER"] = f"{position:0{len(str(total))}d}"
-        audio.save()
+        _write_position(new_path, position, total)
     except Exception:
         pass  # tag best-effort; rename already done
     return new_path
+
+
+def _write_position(path, position, total):
+    """Write the playlist position into the tag using the correct container
+    for the file type (Vorbis TRACKNUMBER for FLAC, ID3 TRCK for MP3)."""
+    if path.suffix.lower() == ".mp3":
+        audio = EasyID3(str(path))
+        audio["tracknumber"] = f"{position:0{len(str(total))}d}"
+        audio.save()
+    else:
+        audio = FLAC(str(path))
+        audio["TRACKNUMBER"] = f"{position:0{len(str(total))}d}"
+        audio.save()
 
 
 # ---------------------------------------------------------------------------

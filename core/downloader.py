@@ -25,7 +25,7 @@ import time
 
 from .config import resolve_output_dir, sync_deezer_arl, read_conf
 from .spotify import safe_folder_name, validate_spotify_url, get_spotify_token, parse_spotify_playlist
-from .deezer import deezer_search, deemix_download
+from .deezer import deezer_search, deemix_download, _dz_field
 from .library import find_existing_track, find_partial_track, tag_and_rename, write_meta
 from .track import Track
 from .event_types import JobEventType, DownloadStatus
@@ -118,7 +118,7 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
         ],
     })
 
-    report(f"[*] {total} tracks. Downloading FLAC from Deezer...")
+    report(f"[*] {total} tracks. Downloading from Deezer... [playlist: {pl_name}]")
     report(f"[*] output folder: {out_dir}")
 
     missed = []
@@ -184,6 +184,10 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
             if q_fb != q:
                 report(f"    [deezer] fallback search: {q_fb}")
                 hit = deezer_search(dz, q_fb, target_title=t.name, target_artists=t.artists)
+                if hit:
+                    matched = hit.get("title") or "?"
+                    matched_artist = _dz_field(hit, "artist", "name")
+                    report(f"    [deezer] fallback matched: {matched_artist} - {matched}")
         if not hit:
             report("    [deezer] no match")
             event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.MISSED, "pct": 0})
@@ -205,7 +209,7 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
                                on_progress=on_progress, on_pct=pct_hook if on_event else None)
         if flac:
             final = tag_and_rename(flac, pos, total)
-            report(f"    [deezer] FLAC downloaded -> {final.name}")
+            report(f"    [deezer] downloaded -> {final.name}")
             event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.DOWNLOADED, "pct": 100})
             statuses.append("downloaded")
             downloaded += 1

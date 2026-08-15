@@ -259,8 +259,9 @@ def deemix_download(dz, deezer_url, settings, out_dir, label, on_progress=None, 
     for key in ("createArtistFolder", "createAlbumFolder", "createSingleFolder",
                 "createCDFolder", "createStructurePlaylist"):
         settings[key] = False
-    before = {f.name for f in out_dir.glob("*.flac")}
-    baseline_mtime = max((f.stat().st_mtime for f in out_dir.glob("*.flac")),
+    before = {f.name for f in out_dir.glob("*.flac")} | {f.name for f in out_dir.glob("*.mp3")}
+    baseline_mtime = max((f.stat().st_mtime
+                          for f in (*out_dir.glob("*.flac"), *out_dir.glob("*.mp3"))),
                          default=0.0)
     try:
         download_object = generateDownloadObject(dz, deezer_url, TrackFormats.FLAC,
@@ -304,8 +305,9 @@ def deemix_download(dz, deezer_url, settings, out_dir, label, on_progress=None, 
     # "Track not found at desired bitrate") writes nothing, so no file will
     # exceed the baseline -- in that case we return None and the caller logs it
     # as missed, rather than returning a stale .flac already in the folder.
-    candidates = [f for f in out_dir.glob("*.flac")
-                  if f.stat().st_mtime > baseline_mtime + 0.01]
+    candidates = [f for f in out_dir.glob("*.flac")]
+    candidates += [f for f in out_dir.glob("*.mp3")]
+    candidates = [f for f in candidates if f.stat().st_mtime > baseline_mtime + 0.01]
     if not candidates:
         return None
     # Prefer a file whose name did not exist before; otherwise the newest one.
