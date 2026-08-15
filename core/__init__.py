@@ -10,15 +10,38 @@ Public API (re-exported here for convenience):
 """
 import logging
 import os
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+from .config import read_conf, CONF_SETTINGS
 
 REPO = Path(__file__).resolve().parent.parent
 LOG_DIR = REPO / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
-# Our logger: console + file.  Uvicorn's loggers are wired into this at
-# server startup (app.py) by adding a FileHandler to them.
+# Log rotation config: capped size + N backup files, old logs roll off.
+# Precedence: env MUSIC_DOWNLOADER_LOG_MAX_BYTES / MUSIC_DOWNLOADER_LOG_BACKUPS
+# > config/settings.conf (log_max_bytes / log_backups) > built-in defaults.
+# ---------------------------------------------------------------------------
+
+def _log_int(key_conf, key_env, default):
+    v = os.environ.get(key_env)
+    if v is None:
+        v = read_conf(CONF_SETTINGS).get(key_conf)
+    if v is None:
+        return default
+    try:
+        return int(v)
+    except ValueError:
+        return default
+
+MAX_BYTES = _log_int("log_max_bytes", "MUSIC_DOWNLOADER_LOG_MAX_BYTES", 5 * 1024 * 1024)
+BACKUPS = _log_int("log_backups", "MUSIC_DOWNLOADER_LOG_BACKUPS", 5)
+
+# ---------------------------------------------------------------------------
+# Our logger: console + rotating file.  Uvicorn's loggers are wired into this
+# at server startup (app.py) via attach_uvicorn_loggers().
 # ---------------------------------------------------------------------------
 
 logger = logging.getLogger("music_downloader")
@@ -30,7 +53,7 @@ _console.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)-5s %(message
 logger.addHandler(_console)
 
 _file_path = str(LOG_DIR / "music_downloader.log")
-_fh = logging.FileHandler(_file_path, encoding="utf-8")
+_fh = RotatingFileHandler(_file_path, maxBytes=MAX_BYTES, backupCount=BACKUPS, encoding="utf-8")
 _fh.setLevel(logging.DEBUG)
 _fh.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)-5s %(name)s:%(lineno)d %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
 logger.addHandler(_fh)
@@ -42,17 +65,25 @@ log = logger
 def attach_uvicorn_loggers():
     """Called at server startup: replace uvicorn's log handlers with ours.
 
-    Uvicorn's default loggers get cleared and pointed at our console + file
-    handlers so all output (app + server) uses the same format.
+    uvicorn / uvicorn.error get console + file handlers. uvicorn.access
+    (routine request logging, incl. the 10s /health heartbeat poll) gets
+    console ONLY -- it is suppressed from the on-disk log so the file stays
+    readable. Errors still reach the file via uvicorn.error.
     """
     import logging as _logging
-    for name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+    for name in ("uvicorn", "uvicorn.error"):
         uv = _logging.getLogger(name)
         uv.handlers = []
         uv.addHandler(_console)
         uv.addHandler(_fh)
         uv.setLevel(logging.DEBUG)
         uv.propagate = False
+    # access logging: console-only, NOT the file (see docstring)
+    uv = _logging.getLogger("uvicorn.access")
+    uv.handlers = []
+    uv.addHandler(_console)
+    uv.setLevel(logging.INFO)
+    uv.propagate = False
 
 
 def _log_from_prints(logger_ref):
@@ -78,7 +109,7 @@ from .library import find_existing_track, tag_and_rename, write_meta
 from .track import Track
 from .job import Job, JobProgress, TrackState
 from .event_types import JobEventType, DownloadStatus
-from .config import resolve_output_dir, sync_deezer_arl, read_conf
+from .config import resolve_output_dir, sync_deezer_arl
 from . import server_lock
 
 __all__ = [
