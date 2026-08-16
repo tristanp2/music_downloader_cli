@@ -107,7 +107,8 @@ def _title_matches(flac_path, title):
 # markers that denote the identical audio under a different label. Remixes,
 # VIPs, dubs, radio edits, etc. are deliberately excluded -- they are different
 # recordings.
-_APPROVED_EDITIONS = {"original mix", "extended mix", "extended"}
+_APPROVED_EDITIONS = {"original mix", "extended mix", "extended",
+                      "studio version", "studio"}
 
 
 def _same_recording_with_edition(a, b):

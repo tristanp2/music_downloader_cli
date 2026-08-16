@@ -991,8 +991,6 @@ async function startUpdate(url) {
     $("#msg").textContent = "job " + r.job_id + " started (update)";
     var ctx = ensureJobCard({ id: r.job_id, url: url, user: getUser(), status: "running" });
     updateJobCard({ id: r.job_id, url: url, user: getUser(), status: "running" });
-    collapseOthers(r.job_id);
-    setJobOpen(ctx, true);
     refreshJobs();
   } catch (e) {
     $("#msg").textContent = "error: " + e.message;
