@@ -414,10 +414,9 @@ function getUser() {
 function setUser(v) {
   localStorage.setItem("music_downloader_user", v);
 
-  for (var fid in knownLib) {
-    knownLib[fid].row.remove();
-    knownLib[fid].detail.remove();
-    delete knownLib[fid];
+  for (const [fid, row] of libraryRows) {
+    row.remove();
+    libraryRows.delete(fid);
   }
 
   for (var folder in fetchedTracks) delete fetchedTracks[folder];
@@ -464,12 +463,12 @@ initUserSelect();
 
 /* ===========================================================================
    KEYED DOM RENDERING (state-backed virtual-ish DOM)
-   - knownCards:  JobCard instances, keyed by job id
-   - knownLib:    rendered library rows, keyed by "lib-<folder>"
+   - jobCards:   JobCard instances, keyed by job id
+   - libraryRows:  LibraryRow instances, keyed by "lib-<folder>"
    - fetchedTracks: raw /library/<folder> payloads, keyed by folder (cache)
    =========================================================================== */
-const knownCards = new Map();  // jobId -> JobCard instance
-const knownLib = {};
+const jobCards = new Map();  // jobId -> JobCard instance
+const libraryRows = new Map(); // folderId ("lib-<folder>") -> LibraryRow instance
 const fetchedTracks = {};
 
 function esc(s) {
@@ -732,7 +731,7 @@ class JobCard {
 
   // Collapse every other card so the newest stays expanded by default.
   static collapseOthers(exceptId) {
-    for (const [id, card] of knownCards) {
+    for (const [id, card] of jobCards) {
       if (id !== exceptId) card.setOpen(false);
     }
   }
@@ -740,10 +739,10 @@ class JobCard {
 
 // --- registry factory: lookup-or-create a JobCard for a job id ---
 function ensureJobCard(j) {
-  let card = knownCards.get(j.id);
+  let card = jobCards.get(j.id);
   if (!card) {
     card = new JobCard(j);
-    knownCards.set(j.id, card);
+    jobCards.set(j.id, card);
   }
   return card;
 }
@@ -758,10 +757,10 @@ function syncJobs(jobs) {
     ensureJobCard(jobs[i]).renderSnapshot(jobs[i]);
   }
 
-  for (const [id, card] of knownCards) {
+  for (const [id, card] of jobCards) {
     if (!jobIds.has(id)) {
       card.remove();
-      knownCards.delete(id);
+      jobCards.delete(id);
     }
   }
 
@@ -773,7 +772,7 @@ function syncJobs(jobs) {
     if (!first) break;
     const rid = first.dataset.job;
     first.remove();
-    if (knownCards.has(rid)) knownCards.delete(rid);
+    if (jobCards.has(rid)) knownCards.delete(rid);
   }
 
   if (!jobs.length) {
@@ -828,11 +827,160 @@ async function refreshJobs() {
    All per-card rendering lives in JobCard.applyEvent.
    =========================================================================== */
 function applyTrackEvent(jobId, type, event) {
-  const card = knownCards.get(jobId);
+  const card = jobCards.get(jobId);
 
   if (!card) return;
 
   card.applyEvent(type, event);
+}
+
+/* ===========================================================================
+   LibraryRow  (one per playlist in the library table)
+   Owns its row + detail elements; renderSummary() paints the summary cells,
+   toggle() expands/collapses the track list (fetching it on first open).
+   =========================================================================== */
+class LibraryRow {
+  constructor(tb, p) {
+    this.folder = p.folder;
+    this.fid = "lib-" + p.folder;
+
+    const row = document.createElement("tr");
+    row.className = "lib-row";
+    row.dataset.folder = p.folder;
+    row.dataset.fid = this.fid;
+    row.onclick = () => this.toggle();
+
+    const chevTd = document.createElement("td");
+    chevTd.className = "lt-chevron";
+    chevTd.innerHTML = "▶";
+    row.appendChild(chevTd);
+
+    const folderTd = document.createElement("td");
+    row.appendChild(folderTd);
+
+    const nameTd = document.createElement("td");
+    row.appendChild(nameTd);
+
+    const totalTd = document.createElement("td");
+    row.appendChild(totalTd);
+
+    const dlTd = document.createElement("td");
+    row.appendChild(dlTd);
+
+    const missTd = document.createElement("td");
+    row.appendChild(missTd);
+
+    const fetchTd = document.createElement("td");
+    row.appendChild(fetchTd);
+
+    const updateTd = document.createElement("td");
+    const updateLink = document.createElement("a");
+    updateLink.className = "update-link";
+    updateLink.href = "#";
+    updateLink.textContent = "update";
+    updateLink.dataset.url = p.spotify_url || "";
+    updateLink.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      startUpdate(e.currentTarget.dataset.url);
+    };
+    updateTd.appendChild(updateLink);
+    row.appendChild(updateTd);
+
+    const zipTd = document.createElement("td");
+    const zipLink = document.createElement("a");
+    zipLink.className = "zip-link";
+    zipLink.href = "/zip/" + encodeURIComponent(p.folder) + "?user=" + encodeURIComponent(getUser());
+    zipLink.textContent = "zip";
+    zipLink.onclick = (e) => e.stopPropagation();
+    zipTd.appendChild(zipLink);
+    row.appendChild(zipTd);
+
+    const detail = document.createElement("tr");
+    detail.className = "lib-detail";
+    detail.dataset.fid = this.fid;
+
+    const detailTd = document.createElement("td");
+    detailTd.colSpan = 9;
+
+    const inner = document.createElement("div");
+    inner.className = "lib-detail-inner";
+    inner.id = "inner-" + this.fid;
+
+    detailTd.appendChild(inner);
+    detail.appendChild(detailTd);
+
+    tb.appendChild(row);
+    tb.appendChild(detail);
+
+    this.row = row;
+    this.detail = detail;
+    this.chevron = chevTd;
+    this.inner = inner;
+  }
+
+  // Paint the summary cells (folder / name / total / dl / miss / fetched).
+  renderSummary(p) {
+    const cells = this.row.children;
+    cells[1].textContent = p.folder;
+
+    cells[2].textContent = p.name;
+
+    cells[3].textContent = p.total;
+
+    cells[4].textContent = p.downloaded;
+
+    cells[5].textContent = p.missed;
+
+    cells[6].textContent = p.fetched_at || "";
+  }
+
+  // Expand/collapse the track list; fetch + cache it on first open.
+  async toggle() {
+    const isOpen = this.detail.classList.contains("open");
+
+    if (isOpen) {
+      this.detail.classList.remove("open");
+      this.chevron.classList.remove("open");
+      return;
+    }
+
+    if (!fetchedTracks[this.folder]) {
+      this.inner.innerHTML = '<div class="empty">loading...</div>';
+      try {
+        const r2 = await fetch("/library/" + encodeURIComponent(this.folder) + "?user=" + encodeURIComponent(getUser()));
+        const pd = await r2.json();
+        fetchedTracks[this.folder] = pd.tracks || [];
+      } catch {
+        this.inner.innerHTML = '<div class="empty">failed to load</div>';
+        return;
+      }
+    }
+
+    const tracks = fetchedTracks[this.folder];
+    this.inner.innerHTML = tracks.map((t) => {
+      const name = t.artist ? t.artist + " - " + t.title : t.title;
+      const dl = t.has_file
+        ? '<a class="lt-dl" href="/library/' + encodeURIComponent(this.folder) +
+          '/track/' + encodeURIComponent(t.position) + '?user=' + encodeURIComponent(getUser()) +
+          '">dl</a>'
+        : '';
+      return '<div class="lib-track">' +
+        '<span class="lt-pos">' + t.position + '</span>' +
+        '<span class="lt-name">' + esc(name) + '</span>' +
+        '<span class="lt-status ' + t.status + '">' + (statusIcons[t.status] || "") + '</span>' +
+        '<span class="lt-dl-cell">' + dl + '</span>' +
+      '</div>';
+    }).join("");
+
+    this.detail.classList.add("open");
+    this.chevron.classList.add("open");
+  }
+
+  remove() {
+    this.row.remove();
+    this.detail.remove();
+  }
 }
 
 async function refreshPlaylists() {
@@ -843,10 +991,9 @@ async function refreshPlaylists() {
 
     const rows = data.playlists || [];
     if (!rows.length) {
-      for (const folder in knownLib) {
-        knownLib[folder].row.remove();
-        knownLib[folder].detail.remove();
-        delete knownLib[folder];
+      for (const [fid, row] of libraryRows) {
+        row.remove();
+        libraryRows.delete(fid);
       }
       tb.innerHTML = '<tr><td colspan="9" class="empty">No playlists yet.</td></tr>';
       return;
@@ -860,151 +1007,23 @@ async function refreshPlaylists() {
       const p = rows[i];
       const fid = "lib-" + p.folder;
       folders.add(fid);
-      let ctx = knownLib[fid];
 
-      if (!ctx) {
-        const row = document.createElement("tr");
-        row.className = "lib-row";
-        row.dataset.folder = p.folder;
-        row.dataset.fid = fid;
-        row.onclick = function() { toggleLib(this); };
-
-        const chevTd = document.createElement("td");
-        chevTd.className = "lt-chevron";
-        chevTd.innerHTML = "\u25b6";
-        row.appendChild(chevTd);
-
-        const folderTd = document.createElement("td");
-        row.appendChild(folderTd);
-
-        const nameTd = document.createElement("td");
-        row.appendChild(nameTd);
-
-        const totalTd = document.createElement("td");
-        row.appendChild(totalTd);
-
-        const dlTd = document.createElement("td");
-        row.appendChild(dlTd);
-
-        const missTd = document.createElement("td");
-        row.appendChild(missTd);
-
-        const fetchTd = document.createElement("td");
-        row.appendChild(fetchTd);
-
-        const updateTd = document.createElement("td");
-        const updateLink = document.createElement("a");
-        updateLink.className = "update-link";
-        updateLink.href = "#";
-        updateLink.textContent = "update";
-        updateLink.dataset.url = p.spotify_url || "";
-        updateLink.onclick = function(e) {
-          e.preventDefault();
-          e.stopPropagation();
-          startUpdate(this.dataset.url);
-        };
-        updateTd.appendChild(updateLink);
-        row.appendChild(updateTd);
-
-        const zipTd = document.createElement("td");
-        const zipLink = document.createElement("a");
-        zipLink.className = "zip-link";
-        zipLink.href = "/zip/" + encodeURIComponent(p.folder) + "?user=" + encodeURIComponent(getUser());
-        zipLink.textContent = "zip";
-        zipLink.onclick = function(e) { e.stopPropagation(); };
-        zipTd.appendChild(zipLink);
-        row.appendChild(zipTd);
-
-        const detail = document.createElement("tr");
-        detail.className = "lib-detail";
-        detail.dataset.fid = fid;
-
-        const detailTd = document.createElement("td");
-        detailTd.colSpan = 9;
-
-        const inner = document.createElement("div");
-        inner.className = "lib-detail-inner";
-        inner.id = "inner-" + fid;
-
-        detailTd.appendChild(inner);
-        detail.appendChild(detailTd);
-
-        tb.appendChild(row);
-        tb.appendChild(detail);
-
-        ctx = { row, detail, chevron: chevTd, inner };
-        knownLib[fid] = ctx;
+      let row = libraryRows.get(fid);
+      if (!row) {
+        row = new LibraryRow(tb, p);
+        libraryRows.set(fid, row);
       }
-
-      const cells = ctx.row.children;
-      cells[1].textContent = p.folder;
-
-      cells[2].textContent = p.name;
-
-      cells[3].textContent = p.total;
-
-      cells[4].textContent = p.downloaded;
-
-      cells[5].textContent = p.missed;
-
-      cells[6].textContent = p.fetched_at || "";
+      row.renderSummary(p);
     }
 
-    for (const fid in knownLib) {
+    for (const [fid, row] of libraryRows) {
       if (!folders.has(fid)) {
-        knownLib[fid].row.remove();
-        knownLib[fid].detail.remove();
-        delete knownLib[fid];
+        row.remove();
+        libraryRows.delete(fid);
       }
     }
   } catch {}
 }
-
-window.toggleLib = async function(row) {
-  const fid = row.dataset.fid;
-  const folder = row.dataset.folder;
-  const ctx = knownLib[fid];
-  if (!ctx) return;
-
-  const isOpen = ctx.detail.classList.contains("open");
-
-  if (isOpen) {
-    ctx.detail.classList.remove("open");
-    ctx.chevron.classList.remove("open");
-    return;
-  }
-
-  if (!fetchedTracks[folder]) {
-    ctx.inner.innerHTML = '<div class="empty">loading...</div>';
-    try {
-      const r2 = await fetch("/library/" + encodeURIComponent(folder) + "?user=" + encodeURIComponent(getUser()));
-      const pd = await r2.json();
-      fetchedTracks[folder] = pd.tracks || [];
-    } catch {
-      ctx.inner.innerHTML = '<div class="empty">failed to load</div>';
-      return;
-    }
-  }
-
-  const tracks = fetchedTracks[folder];
-  ctx.inner.innerHTML = tracks.map(function(t) {
-    var name = t.artist ? t.artist + " - " + t.title : t.title;
-    var dl = t.has_file
-      ? '<a class="lt-dl" href="/library/' + encodeURIComponent(folder) +
-        '/track/' + encodeURIComponent(t.position) + '?user=' + encodeURIComponent(getUser()) +
-        '">dl</a>'
-      : '';
-    return '<div class="lib-track">' +
-      '<span class="lt-pos">' + t.position + '</span>' +
-      '<span class="lt-name">' + esc(name) + '</span>' +
-      '<span class="lt-status ' + t.status + '">' + (statusIcons[t.status] || "") + '</span>' +
-      '<span class="lt-dl-cell">' + dl + '</span>' +
-    '</div>';
-  }).join("");
-
-  ctx.detail.classList.add("open");
-  ctx.chevron.classList.add("open");
-};
 
 // Disable the queue button while a request is in flight so rapid clicks /
 // Enter presses can't spam the job queue (the backend also rejects duplicate
