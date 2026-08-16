@@ -8,6 +8,8 @@ Public API (re-exported here for convenience):
     from core.library import find_existing_track, tag_and_rename, write_meta
     from core.spotify import get_spotify_token, get_spotify_token_silent, parse_spotify_playlist
 """
+from __future__ import annotations
+
 import logging
 import os
 import asyncio
@@ -26,7 +28,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 # > config/settings.conf (log_max_bytes / log_backups) > built-in defaults.
 # ---------------------------------------------------------------------------
 
-def _log_int(key_conf, key_env, default):
+def _log_int(key_conf: str, key_env: str, default: int) -> int:
     v = os.environ.get(key_env)
     if v is None:
         v = read_conf(CONF_SETTINGS).get(key_conf)
@@ -46,7 +48,7 @@ class _HealthAccessFilter(logging.Filter):
     don't clutter the log. Every other request still logs normally.
     """
 
-    def filter(self, record):
+    def filter(self, record: logging.LogRecord) -> bool:
         return "/health" not in record.getMessage()
 
 
@@ -63,7 +65,7 @@ class _ShutdownCancelFilter(logging.Filter):
     passes through untouched.
     """
 
-    def filter(self, record):
+    def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
         if "Exception in ASGI application" not in msg:
             return True
@@ -98,7 +100,7 @@ logger.addHandler(_fh)
 log = logger
 
 
-def attach_uvicorn_loggers():
+def attach_uvicorn_loggers() -> None:
     """Called at server startup: replace uvicorn's log handlers with ours.
 
     uvicorn / uvicorn.error and uvicorn.access get console + file handlers, so
@@ -129,7 +131,7 @@ def attach_uvicorn_loggers():
     uv.addFilter(_HealthAccessFilter())
 
 
-def _log_from_prints(logger_ref):
+def _log_from_prints(logger_ref: logging.Logger) -> logging.Logger:
     """Convenience: return the logger so modules can use `log.info(msg)` etc.
 
     Old code that does `print(msg)` or `on_progress(msg)` should call

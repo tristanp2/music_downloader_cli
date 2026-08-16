@@ -4,6 +4,8 @@ playlist parsing, and URL validation.
 CLI path: get_spotify_token() does the full interactive auth-code flow.
 Web path: get_spotify_token_silent() uses only cache + refresh (no browser).
 """
+from __future__ import annotations
+
 import json
 import re
 import time
@@ -13,6 +15,7 @@ import urllib.error
 import webbrowser
 import http.server
 import threading
+from typing import TypedDict
 
 
 SPOTIFY_SCOPE = "playlist-read-private playlist-read-collaborative"
@@ -26,7 +29,7 @@ from .track import Track
 # low-level HTTP helpers
 # ---------------------------------------------------------------------------
 
-def _spotify_api_get(token, url):
+def _spotify_api_get(token: str, url: str) -> dict:
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read().decode("utf-8"))
@@ -35,7 +38,7 @@ def _spotify_api_get(token, url):
 
 
 
-def _exchange_code_for_token(client_id, client_secret, code):
+def _exchange_code_for_token(client_id: str, client_secret: str, code: str) -> dict:
     data = urllib.parse.urlencode({
         "grant_type": "authorization_code",
         "code": code,
@@ -50,7 +53,7 @@ def _exchange_code_for_token(client_id, client_secret, code):
         return json.loads(r.read().decode("utf-8"))
 
 
-def _refresh_token(client_id, client_secret, refresh_token):
+def _refresh_token(client_id: str, client_secret: str, refresh_token: str) -> dict:
     data = urllib.parse.urlencode({
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
@@ -68,7 +71,7 @@ def _refresh_token(client_id, client_secret, refresh_token):
 # token getters
 # ---------------------------------------------------------------------------
 
-def get_spotify_token():
+def get_spotify_token() -> str:
     """Return a valid Spotify access token (interactive: may open a browser).
 
     Uses cached token when possible, refreshes when expired, falls back to a
@@ -100,7 +103,7 @@ def get_spotify_token():
     return _do_auth_code_flow(client_id, client_secret)
 
 
-def get_spotify_token_silent():
+def get_spotify_token_silent() -> str | None:
     """Return a valid Spotify access token WITHOUT user interaction.
 
     Uses cache first, then refresh. If both fail (no cache / refresh invalid /
@@ -129,7 +132,7 @@ def get_spotify_token_silent():
     return None
 
 
-def _do_auth_code_flow(client_id, client_secret):
+def _do_auth_code_flow(client_id: str, client_secret: str) -> str:
     scope = SPOTIFY_SCOPE
     auth_url = ("https://accounts.spotify.com/authorize?" +
                 urllib.parse.urlencode({
@@ -142,7 +145,7 @@ def _do_auth_code_flow(client_id, client_secret):
     received = {}
 
     class _CallbackHandler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
+        def do_GET(self) -> None:
             q = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(q)
             if "code" in params:
@@ -155,7 +158,7 @@ def _do_auth_code_flow(client_id, client_secret):
                 self.send_response(400)
                 self.end_headers()
             received["done"] = True
-        def log_message(self, *a):
+        def log_message(self, format: str, *args: object) -> None:
             pass
 
     srv = http.server.HTTPServer(("127.0.0.1", 48721), _CallbackHandler)
@@ -181,21 +184,26 @@ def _do_auth_code_flow(client_id, client_secret):
 # playlist parsing
 # ---------------------------------------------------------------------------
 
-def parse_spotify_playlist(token, playlist_id):
+class PlaylistData(TypedDict):
+    name: str
+    tracks: list[Track]
+
+
+def parse_spotify_playlist(token: str, playlist_id: str) -> PlaylistData:
     """Return {name, tracks:[{name, artists, position, spotify_uri}]}.
 
     Handles both the classic Spotify response shape
     (pl["tracks"]["items"][i]["track"]) and the newer shape
     (pl["items"][i]["item"]). Pagination is followed automatically.
     """
-    def extract_container(pl):
+    def extract_container(pl: dict) -> dict | None:
         for key in ("tracks", "items"):
             node = pl.get(key)
             if isinstance(node, dict) and isinstance(node.get("items"), list):
                 return node
         return None
 
-    def track_of(item):
+    def track_of(item: dict) -> dict | None:
         t = item.get("track")
         if not isinstance(t, dict):
             t = item.get("item")
@@ -238,7 +246,7 @@ def parse_spotify_playlist(token, playlist_id):
     return {"name": name, "tracks": tracks}
 
 
-def validate_spotify_url(url):
+def validate_spotify_url(url: str) -> str | None:
     """Accept only open.spotify.com playlist/album/track URLs. Returns the ID
     or None."""
     try:
@@ -253,7 +261,7 @@ def validate_spotify_url(url):
     return m.group(2)
 
 
-def safe_folder_name(name):
+def safe_folder_name(name: str | None) -> str | None:
     """Make a playlist name safe for use as a folder name."""
     if not name:
         return None

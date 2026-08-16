@@ -17,18 +17,21 @@ The PID check is a real liveness probe (os.kill(pid, 0)), not just "does the
 file exist", so a crashed server leaves a stale lock that the CLI correctly
 ignores and falls back to local mode.
 """
+from __future__ import annotations
+
 import json
 import os
 import sys
-import urllib.parse
+from urllib.parse import urlencode
 from pathlib import Path
 
 from .config import REPO, read_conf
+from deezer import Deezer
 
 LOCK_PATH = REPO / ".server.lock"
 
 
-def _pid_alive(pid):
+def _pid_alive(pid: int) -> bool:
     """Return True if a process with this PID currently exists (cross-platform)."""
     if os.name == "nt":
         # On Windows, OpenProcess + a no-op signal check. os.kill(pid, 0) works.
@@ -44,7 +47,7 @@ def _pid_alive(pid):
     return True
 
 
-def write_lock(port):
+def write_lock(port: int) -> None:
     """Create / refresh the lockfile with our PID + port.
 
     If an existing lock points at a DEAD PID (server crashed / hard-killed),
@@ -68,7 +71,7 @@ def write_lock(port):
     LOCK_PATH.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def clear_lock():
+def clear_lock() -> None:
     """Remove the lockfile. PID-agnostic: on Windows SIGTERM is a hard kill that
     never runs shutdown/atexit, so gating on our own PID would leave the lock
     orphaned. Whoever is shutting down owns the lock at that moment, so just
@@ -82,7 +85,7 @@ def clear_lock():
         pass
 
 
-def read_lock():
+def read_lock() -> tuple[int, int] | None:
     """Return (pid, port) from a live lock, or None if no live server.
 
     A lock is 'live' only if the recorded PID is still running. A stale lock
@@ -103,13 +106,13 @@ def read_lock():
         return None
 
 
-def server_is_up():
+def server_is_up() -> int | None:
     """Convenience: return the live server port, or None."""
     live = read_lock()
     return live[1] if live else None
 
 
-def another_server_running():
+def another_server_running() -> bool:
     """True if a DIFFERENT live process holds the lock (refuse to start)."""
     live = read_lock()
     if not live:
@@ -118,7 +121,7 @@ def another_server_running():
     return pid != os.getpid()
 
 
-def _server_token():
+def _server_token() -> str | None:
     """Shared secret for POST /download. Source: env MUSIC_DOWNLOADER_SERVER_TOKEN,
     then config/settings.conf `server_token`. None if unset."""
     env = os.environ.get("MUSIC_DOWNLOADER_SERVER_TOKEN")
@@ -128,7 +131,7 @@ def _server_token():
     return cfg.get("server_token") or None
 
 
-def cli_dispatch(url, dz=None, settings=None, work_dir=None, user=None):
+def cli_dispatch(url: str, dz: "Deezer | None" = None, settings: dict | None = None, work_dir: Path | None = None, user: str | None = None) -> dict:
     """Route a download request: POST to the running server if up, else run
     locally via the core lib.
 
@@ -153,7 +156,7 @@ def cli_dispatch(url, dz=None, settings=None, work_dir=None, user=None):
     return r
 
 
-def _post_to_server(port, url, user=None):
+def _post_to_server(port: int, url: str, user: str | None = None) -> dict:
     """POST {url} to the running server's /download endpoint. Returns the
     server's JSON result dict. Network errors surface as an error dict so the
     CLI can still report cleanly."""
@@ -162,7 +165,7 @@ def _post_to_server(port, url, user=None):
 
     token = _server_token()
     body = json.dumps({"url": url}).encode("utf-8")
-    qs = urllib.parse.urlencode({"user": user}) if user else ""
+    qs = urlencode({"user": user}) if user else ""
     req_url = f"http://localhost:{port}/download?{qs}"
     req = urllib.request.Request(
         req_url,

@@ -27,6 +27,8 @@ Run:
   # bind that NIC only, keeping the server off the Tailscale virtual interface.
   # Optional arg = port (default 8000), or set env MUSIC_DOWNLOADER_PORT.
 """
+from __future__ import annotations
+
 import os
 import sys
 import time
@@ -38,6 +40,7 @@ import asyncio
 import traceback
 from pathlib import Path
 from collections import defaultdict
+from collections.abc import AsyncGenerator, Iterator
 from dataclasses import asdict
 
 from fastapi import FastAPI, Request, HTTPException
@@ -46,6 +49,7 @@ from fastapi.staticfiles import StaticFiles
 
 from core.config import resolve_output_dir, sync_deezer_arl, ARL, read_conf, read_users, CONF_SETTINGS
 from core.deezer import init_deezer
+from deezer import Deezer
 from core.downloader import run_playlist
 from core.spotify import validate_spotify_url, get_spotify_token, parse_spotify_playlist
 from core.registry import list_playlists
@@ -145,18 +149,18 @@ def _resolve_user_path(user: str, folder: str) -> Path:
         raise HTTPException(status_code=403, detail="invalid path")
     return fp
 
-DZ = None          # the one Deezer session, set in startup()
+DZ: "Deezer | None" = None          # the one Deezer session, set in startup()
 DZ_LOCK = threading.Lock()   # serialize Deezer calls (session not thread-safe)
-JOBS = {}          # job_id -> Job
+JOBS: dict[str, Job] = {}          # job_id -> Job
 JOBS_LOCK = threading.Lock()
 
 # SSE event subscribers: job_id -> list[asyncio.Queue]
-EVENT_SUBS = {}
+EVENT_SUBS: dict[str, list[asyncio.Queue]] = {}
 EVENT_SUBS_LOCK = threading.Lock()
-EVENT_LOOP = None   # set in startup() -- uvicorn's running loop
+EVENT_LOOP: asyncio.AbstractEventLoop | None = None   # set in startup() -- uvicorn's running loop
 
 
-def _push_event(job_id, event):
+def _push_event(job_id: str, event: dict) -> None:
     """Thread-safe: push an event dict to all SSE subscribers for this job.
 
     Uses the globally-stored EVENT_LOOP (captured at startup) rather than
@@ -190,11 +194,11 @@ def _push_event(job_id, event):
 # not per-job. Carries job_created / job_done for EVERY job regardless of which
 # user created it, so all simultaneously-connected browsers see new jobs and
 # completions in real time (no 10s poll dependency for cross-user visibility).
-JOB_FEED_SUBS = []
+JOB_FEED_SUBS: list[asyncio.Queue] = []
 JOB_FEED_LOCK = threading.Lock()
 
 
-def _job_public(job):
+def _job_public(job: Job) -> dict:
     """JSON-friendly snapshot of a Job for the shared feed."""
     return {
         "id": job.id, "url": job.url, "user": job.user, "name": job.name,
@@ -210,7 +214,7 @@ def _job_public(job):
     }
 
 
-def _jsonable(v):
+def _jsonable(v: object) -> object:
     """Recursively coerce non-JSON types (notably pathlib.Path / WindowsPath)
     to str. Guarantees nothing in a serialized payload can raise
     'Object of type WindowsPath is not JSON serializable' en route to the frontend."""
@@ -223,14 +227,14 @@ def _jsonable(v):
     return v
 
 
-def _dumps(obj):
+def _dumps(obj: object) -> str:
     """json.dumps with a Path-safe fallback. Used by every SSE generator so that
     ANY event carrying a filesystem path (e.g. a download result's folder) is
     serialized as a string instead of crashing the stream mid-job."""
     return json.dumps(obj, default=_jsonable)
 
 
-def _push_job_feed(event):
+def _push_job_feed(event: dict) -> None:
     """Broadcast a job-feed event to every connected tab. Same loop-safe
     pattern as _push_event (uses the global EVENT_LOOP captured at startup)."""
     global EVENT_LOOP
@@ -250,7 +254,7 @@ def _push_job_feed(event):
 
 
 
-def _bind_host():
+def _bind_host() -> str:
     """Interface uvicorn listens on. Precedence: env MUSIC_DOWNLOADER_BIND_HOST >
     config/settings.conf `bind_host` > default 0.0.0.0 (all interfaces).
     Set `bind_host` to your LAN IP to listen only on that NIC, which keeps
@@ -265,14 +269,14 @@ def _bind_host():
 BIND_HOST = _bind_host()
 
 
-def _server_token():
+def _server_token() -> str | None:
     env = os.environ.get("MUSIC_DOWNLOADER_SERVER_TOKEN")
     if env:
         return env
     return read_conf(REPO / "config" / "settings.conf").get("server_token") or None
 
 
-def _deezer_session_ok():
+def _deezer_session_ok() -> bool:
     """Best-effort liveness probe. dz.logged_in is only set at login and goes
     stale, so we make an auth-requiring call (get_user_data) and treat any
     exception as a dead/expired session (e.g. Deezer free-trial FLAC access
@@ -291,7 +295,7 @@ def _deezer_session_ok():
 # job runner
 # ---------------------------------------------------------------------------
 
-def _run_job(job_id, url, user):
+def _run_job(job_id: str, url: str, user: str) -> None:
     """Background thread: run the playlist and stream progress into the job."""
     global DZ
     job = JOBS[job_id]
@@ -300,9 +304,9 @@ def _run_job(job_id, url, user):
     work_dir = WORK_DIR_BASE / user
     work_dir.mkdir(parents=True, exist_ok=True)
     with DZ_LOCK:
-        def on_progress(msg):
+        def on_progress(msg: str) -> None:
             lines.append(msg)
-        def on_event(e):
+        def on_event(e: dict) -> None:
             _push_event(job_id, e)
             t = e.get("type")
             if t == JobEventType.TRACKS:
@@ -325,25 +329,28 @@ def _run_job(job_id, url, user):
                 if pos in tracks:
                     tracks[pos].status = e["status"]
                     tracks[pos].pct = e["pct"]
-        # The download actually begins here (after waiting its turn behind
-        # DZ_LOCK). Stamp the true start time and broadcast it so the frontend
-        # shows this, not the enqueue/sync time (JOB_CREATED already fired with
-        # the placeholder). JOB_DONE later carries the same value for finished jobs.
-        job.started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-        _push_event(job_id, {"type": JobEventType.JOB_STARTED, "started_at": job.started_at})
-        _push_job_feed({"type": JobEventType.JOB_STARTED, "job": _job_public(job)})
-        try:
-            result = run_playlist(url, DZ, SETTINGS, work_dir=work_dir,
-                                  on_progress=on_progress, on_event=on_event)
-        except Exception as e:
-            tb = traceback.format_exc()
-            log.error("run_playlist raised: %s", e)
-            for line in tb.strip().split("\n"):
-                log.error("  %s", line)
-            result = {"ok": False, "error": f"run_playlist raised: {e}", "traceback": tb}
+        dz_local = DZ
+        if dz_local is None:
+            result = {"ok": False, "error": "Deezer session not ready"}
+        else:
+            # The download actually begins here (after waiting its turn behind
+            # DZ_LOCK). Stamp the true start time and broadcast it so the
+            # frontend shows this, not the enqueue/sync time.
+            job.started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+            _push_event(job_id, {"type": JobEventType.JOB_STARTED, "started_at": job.started_at})
+            _push_job_feed({"type": JobEventType.JOB_STARTED, "job": _job_public(job)})
+            try:
+                result = run_playlist(url, dz_local, SETTINGS, work_dir=work_dir,
+                                      on_progress=on_progress, on_event=on_event)
+            except Exception as e:
+                tb = traceback.format_exc()
+                log.error("run_playlist raised: %s", e)
+                for line in tb.strip().split("\n"):
+                    log.error("  %s", line)
+                result = {"ok": False, "error": f"run_playlist raised: {e}", "traceback": tb}
     job.result = result
     job.status = DownloadStatus.OK if result.get("ok") else DownloadStatus.ERROR
-    job.name = result.get("name") or ""
+    job.name = str(result.get("name") or "")
     job.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     # Signal SSE subscribers that the job is finished.
     # Convert Path to str so the event is JSON-serializable.
@@ -356,7 +363,7 @@ def _run_job(job_id, url, user):
     _push_job_feed({"type": JobEventType.JOB_DONE, "job": _job_public(job)})
 
 
-def _authenticate(request: Request):
+def _authenticate(request: Request) -> None:
     token = _server_token()
     if not token:
         return  # no token configured -> open (localhost use)
@@ -375,14 +382,14 @@ atexit.register(server_lock.clear_lock)
 
 
 @app.get("/", response_class=HTMLResponse)
-def index():
+def index() -> HTMLResponse:
     html = (REPO / "templates" / "index.html")
     if html.is_file():
         return HTMLResponse(html.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>music-downloader</h1><p>templates/index.html not found.</p>")
 
 
-def _start_job(url, user, name=""):
+def _start_job(url: str, user: str, name: str = "") -> str | None:
     """Create a Job and kick off its background worker. Shared by POST /download
     and the sync enqueuer so every start goes through one path (single queue,
     one DZ_LOCK, identical SSE wiring). `name` is the resolved playlist title,
@@ -423,7 +430,7 @@ def _start_job(url, user, name=""):
 _SYNC_LOCK = threading.Lock()
 
 
-def _derive_user_for_folder(folder_path):
+def _derive_user_for_folder(folder_path: Path) -> str:
     """Given a playlist folder under WORK_DIR_BASE, return its owning user.
 
     Layout is WORK_DIR_BASE/<user>/<folder>. If the folder sits directly under
@@ -441,7 +448,7 @@ def _derive_user_for_folder(folder_path):
     return users[0] if users else "tristan"
 
 
-def enqueue_sync_all():
+def enqueue_sync_all() -> dict[str, object]:
     """Walk the filesystem registry and enqueue a normal job for each known
     playlist's Spotify URL. Returns {"queued": N, "jobs": [job_id...], "skipped": reason}.
 
@@ -489,7 +496,7 @@ def enqueue_sync_all():
     return {"queued": len(jobs), "jobs": jobs, "skipped": None}
 
 
-def start_scheduler(interval_hours):
+def start_scheduler(interval_hours: float) -> None:
     """Background thread: every interval_hours, enqueue a sync of all playlists.
 
     Runs only while the interpreter is live (daemon thread, no catch-up for
@@ -502,7 +509,7 @@ def start_scheduler(interval_hours):
         return
     interval = interval_hours * 3600.0
 
-    def _loop():
+    def _loop() -> None:
         while True:
             time.sleep(interval)
             if not _SYNC_LOCK.acquire(blocking=False):
@@ -523,7 +530,7 @@ def start_scheduler(interval_hours):
     log.info("[scheduler] started, interval = %s h", interval_hours)
 
 
-def start_liveness_log(interval_seconds=60):
+def start_liveness_log(interval_seconds: int = 60) -> None:
     """Background heartbeat: every interval, emit a one-line [alive] log so the
     file carries evidence the server is up + how many clients are connected.
 
@@ -531,7 +538,7 @@ def start_liveness_log(interval_seconds=60):
     browser tab) for the connected-client count, and JOBS for active jobs.
     No new machinery -- same daemon-thread + time.sleep pattern as start_scheduler.
     """
-    def _loop():
+    def _loop() -> None:
         while True:
             time.sleep(interval_seconds)
             try:
@@ -589,7 +596,7 @@ def download(request: Request, payload: dict):
 
 
 @app.post("/sync")
-def sync(request: Request):
+def sync(request: Request) -> dict:
     """Manually trigger a sync: enqueue a normal job for every known playlist.
 
     Auth-gated like /download. If a sync (periodic or manual) is already in
@@ -609,7 +616,7 @@ def sync(request: Request):
 
 
 @app.get("/jobs")
-def jobs(request: Request):
+def jobs(request: Request) -> dict:
     user = _require_user(request)
     with JOBS_LOCK:
         items = sorted(JOBS.values(), key=lambda j: j.started_at, reverse=True)
@@ -639,7 +646,7 @@ async def job_feed_stream(request: Request):
     for j in existing:
         await queue.put({"type": JobEventType.JOB_CREATED, "job": _job_public(j)})
 
-    async def event_stream():
+    async def event_stream() -> AsyncGenerator[str, None]:
         try:
             while True:
                 if await request.is_disconnected():
@@ -681,19 +688,19 @@ def job_status(job_id: str):
 
 
 @app.get("/users")
-def get_users():
+def get_users() -> dict:
     users = read_users()
     return {"users": users, "default": users[0] if users else None}
 
 
 @app.get("/playlists")
-def playlists(request: Request):
+def playlists(request: Request) -> dict:
     user = _require_user(request)
     return {"playlists": list_playlists(WORK_DIR_BASE / user)}
 
 
 @app.get("/health")
-def health():
+def health() -> JSONResponse:
     ok = _deezer_session_ok()
     return JSONResponse(
         status_code=200 if ok else 503,
@@ -763,7 +770,7 @@ def download_zip(request: Request, folder: str):
     safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in folder)
     filename = safe_name + ".zip"
 
-    def gen():
+    def gen() -> Iterator[bytes]:
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for fpath in sorted(fp.glob("*.flac")):

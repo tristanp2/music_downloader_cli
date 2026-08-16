@@ -1,10 +1,14 @@
 """Deezer session init, search (with Jaccard title scoring), and FLAC download
 via deemix. The ProgressListener bridges deemix to a rich progress bar.
 """
+from __future__ import annotations
+
 import contextlib
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
+from rich.progress import TaskID
 
 from deezer import Deezer, TrackFormats
 from deemix import generateDownloadObject
@@ -21,7 +25,7 @@ log = logging.getLogger("music_downloader")
 # helpers
 # ---------------------------------------------------------------------------
 
-def _dz_field(track, *keys, default=""):
+def _dz_field(track: object, *keys: str, default: str = "") -> str:
     """Read a nested key from a Deezer result dict, tolerating missing fields."""
     cur = track
     for k in keys:
@@ -31,12 +35,12 @@ def _dz_field(track, *keys, default=""):
     return cur if isinstance(cur, str) else default
 
 
-def _tokenize(s):
+def _tokenize(s: str | None) -> set[str]:
     """Lowercase, strip punctuation, split on whitespace -> set of tokens."""
     return set(re.sub(r'[^a-z0-9]+', ' ', (s or '').lower()).split())
 
 
-def _title_similarity(a, b):
+def _title_similarity(a: str, b: str) -> float:
     """Jaccard similarity between two title strings (word tokens)."""
     ta, tb = _tokenize(a), _tokenize(b)
     if not ta or not tb:
@@ -57,7 +61,7 @@ _EDITION_SUFFIXES = (
 )
 
 
-def _strip_editions(title):
+def _strip_editions(title: str | None) -> str | None:
     """Drop edition/version phrases so 'Song Original Mix' == 'Song' for matching.
 
     Strips DJ/electronic labelling (Original Mix, Extended, Remastered, Radio
@@ -84,7 +88,7 @@ def _strip_editions(title):
     return t
 
 
-def _has_remix(title):
+def _has_remix(title: str | None) -> bool:
     """True if the (raw) title carries a remix token -- a distinct recording.
 
     Substring check (not word-bounded) so it catches 'Song (Artist Remix)',
@@ -98,7 +102,7 @@ def _has_remix(title):
 # search
 # ---------------------------------------------------------------------------
 
-def deezer_search(dz, query, target_title=None, target_artists=None, target_duration=None):
+def deezer_search(dz: "Deezer", query: str, target_title: str | None = None, target_artists: list[str] | None = None, target_duration: int | None = None) -> dict | None:
     """Return the best Deezer track dict for a query, or None.
 
     Deezer's search ranks by popularity, so the top hit is often NOT the track
@@ -136,7 +140,7 @@ def deezer_search(dz, query, target_title=None, target_artists=None, target_dura
     target_title_core = _tokenize(_strip_editions(target_title))
     target_is_remix = _has_remix(target_title)
 
-    def _durations_match(track):
+    def _durations_match(track: object) -> bool:
         """True only if both sides have a duration and they agree within tol.
 
         Fail-safe: if either duration is missing we CANNOT confirm a
@@ -151,7 +155,7 @@ def deezer_search(dz, query, target_title=None, target_artists=None, target_dura
             return False
         return abs(candidate_duration - target_duration_sec) <= 2.0
 
-    def score(track):
+    def score(track: object) -> float:
         candidate_title = _dz_field(track, "title")
         candidate_artist = _dz_field(track, "artist", "name")
         candidate_title_core = _tokenize(_strip_editions(candidate_title))
@@ -224,14 +228,15 @@ class ProgressListener:
 
     BUCKET_SIZE = 10
 
-    def __init__(self, progress=None, task_id=None, label="", on_progress=None):
+    def __init__(self, progress: "Progress | None" = None, task_id: TaskID | None = None, label: str = "", on_progress: Callable[[str], None] | None = None):
         self.progress = progress
         self.task_id = task_id
         self.label = label
         self.on_progress = on_progress
+        self._on_pct: Callable[[int], None] | None = None
         self._last_bucket = -1
 
-    def send(self, key, value=None):
+    def send(self, key: str, value: object = None) -> None:
         if key == "updateQueue" and isinstance(value, dict):
             pct = value.get("progress")
             if isinstance(pct, (int, float)):
@@ -243,12 +248,13 @@ class ProgressListener:
                 self._last_bucket = bucket
                 rounded_pct = bucket * self.BUCKET_SIZE
                 # structured event callback (server mode)
-                if getattr(self, '_on_pct', None):
-                    self._on_pct(rounded_pct)
+                on_pct = self._on_pct
+                if on_pct is not None:
+                    on_pct(rounded_pct)
                 if self.on_progress is not None:
                     msg = f"    {self.label} [{rounded_pct}%]"
                     self.on_progress(msg)
-                if self.progress is not None:
+                if self.progress is not None and self.task_id is not None:
                     self.progress.update(self.task_id, completed=int(pct))
                 return
         if key == "downloadInfo" and isinstance(value, dict):
@@ -259,7 +265,7 @@ class ProgressListener:
                     msg = f"    {self.label} [{state}]"
                     log.info(msg)
                     self.on_progress(msg)
-                elif self.progress is not None:
+                elif self.progress is not None and self.task_id is not None:
                     self.progress.update(self.task_id, description=f"{self.label} [{state}]")
             return
         # fall back to deemix's own human-readable line for anything else
@@ -273,7 +279,7 @@ class ProgressListener:
                 self.progress.console.print(f"    {line}")
 
 
-def deemix_download(dz, deezer_url, settings, out_dir, label, on_progress=None, on_pct=None):
+def deemix_download(dz: "Deezer", deezer_url: str, settings: dict, out_dir: Path, label: str, on_progress: Callable[[str], None] | None = None, on_pct: Callable[[int], None] | None = None) -> Path | None:
     """Download a Deezer URL as FLAC via the deemix library (not subprocess).
 
     Forces a FLAT layout (no artist/album subfolders) so the file lands directly
@@ -359,7 +365,7 @@ def deemix_download(dz, deezer_url, settings, out_dir, label, on_progress=None, 
 # session init
 # ---------------------------------------------------------------------------
 
-def init_deezer(arl_text):
+def init_deezer(arl_text: str) -> "Deezer":
     """Create + log in a Deezer session via ARL. Returns the session or dies."""
     dz = Deezer()
     if not dz.login_via_arl(arl_text):

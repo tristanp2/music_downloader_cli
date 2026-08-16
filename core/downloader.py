@@ -20,12 +20,14 @@ Returns a dict:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 import time
 
 from .config import resolve_output_dir, sync_deezer_arl, read_conf
 from .spotify import safe_folder_name, validate_spotify_url, get_spotify_token, parse_spotify_playlist
 from .deezer import deezer_search, deemix_download, _dz_field
+from deezer import Deezer
 from .library import find_existing_track, find_partial_track, tag_and_rename, write_meta
 from .track import Track
 from .event_types import JobEventType, DownloadStatus
@@ -33,7 +35,7 @@ from .event_types import JobEventType, DownloadStatus
 log = logging.getLogger("music_downloader")
 
 
-def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=None):
+def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None = None, on_progress: Callable[[str], None] | None = None, on_event: Callable[[dict], None] | None = None) -> dict[str, object]:
     """Download one Spotify playlist/album/track. Returns a result dict.
 
     Parameters
@@ -57,14 +59,14 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
         - {"type": "done", "pos": N, "status": "downloaded"|"skipped"|"missed"|"failed", "pct": 0|100}
     """
     out = {}
-    def report(msg):
+    def report(msg: str) -> None:
         if msg:
             log.info(msg)
         if on_progress:
             on_progress(msg)
         else:
             print(msg)
-    def event(e):
+    def event(e: dict) -> None:
         if on_event:
             on_event(e)
 
@@ -202,7 +204,7 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
             continue
 
         # download
-        def pct_hook(p):
+        def pct_hook(p: int) -> None:
             event({"type": JobEventType.PCT, "pos": pos, "pct": p})
 
         flac = deemix_download(dz, dz_url, settings, out_dir, label,

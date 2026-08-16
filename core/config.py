@@ -3,10 +3,13 @@
 Kept dependency-free (stdlib only) so every other core module can import it
 without triggering heavy third-party imports (deezer/deemix/rich).
 """
+from __future__ import annotations
+
 import os
 import sys
 import re
 from pathlib import Path
+from typing import NoReturn
 
 # ---- paths -----------------------------------------------------------------
 # config.py lives in <repo>/core/config.py, so the repo root is its parent.
@@ -20,12 +23,12 @@ SPOTIFY_TOKEN_CACHE = REPO / "spotify_token.json"
 SPOTIFY_REDIRECT = "http://127.0.0.1:48721/callback"
 
 
-def die(msg):
+def die(msg: str) -> NoReturn:
     print(f"[fatal] {msg}", file=sys.stderr)
     sys.exit(1)
 
 
-def read_conf(path):
+def read_conf(path: Path) -> dict[str, str]:
     """Parse a simple 'key = value' conf into a dict."""
     d = {}
     if not path.is_file():
@@ -39,7 +42,7 @@ def read_conf(path):
     return d
 
 
-def resolve_output_dir():
+def resolve_output_dir() -> Path:
     """Output base dir precedence: env MUSIC_DOWNLOADER_OUT > config/settings.conf
     `output_dir` > default ~/Music/music_downloader_outputs. `~` expands to home.
     """
@@ -52,7 +55,7 @@ def resolve_output_dir():
     return DEFAULT_WORK_DIR.resolve()
 
 
-def read_users():
+def read_users() -> list[str]:
     """Read allowed users from config/settings.conf. Returns list of usernames.
     Falls back to ['tristan'] if the key is missing."""
     cfg = read_conf(CONF_SETTINGS)
@@ -62,7 +65,7 @@ def read_users():
     return [u.strip() for u in raw.split(",") if u.strip()]
 
 
-def sync_deezer_arl():
+def sync_deezer_arl() -> None:
     """Make deezer.arl the single source of truth: copy it into config/.arl
     (deemix portable mode reads that). Keeps you from editing two files."""
     if not ARL.is_file():

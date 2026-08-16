@@ -3,6 +3,8 @@
 All three are pure filesystem operations on the playlist folder (out_dir).
 No network, no session. Importable by app.py, sync.py, and the CLI alike.
 """
+from __future__ import annotations
+
 import re
 from pathlib import Path
 
@@ -17,12 +19,12 @@ from .track import Track
 # skip-if-exists
 # ---------------------------------------------------------------------------
 
-def _normalize(s):
+def _normalize(s: str | None) -> str:
     """Case/space/punctuation-insensitive key for fuzzy track matching."""
     return re.sub(r'[^a-z0-9]+', '', (s or "").lower())
 
 
-def _core_artist_title(stem):
+def _core_artist_title(stem: str) -> tuple[str, str]:
     """From a filename stem, return (artist, title) by splitting on ' - '.
 
     Filenames are bare (no position prefix), e.g. 'Eddie C - X'.
@@ -33,7 +35,7 @@ def _core_artist_title(stem):
     return "", stem
 
 
-def _is_complete_audio(path):
+def _is_complete_audio(path: Path) -> bool:
     """Return True only if the file is a valid audio file (FLAC or MP3)
     whose core metadata (TITLE + ALBUM, the fields Windows Explorer shows in
     its columns) is actually populated.
@@ -69,7 +71,7 @@ def _is_complete_audio(path):
         return False
 
 
-def _title_matches(flac_path, title):
+def _title_matches(flac_path: Path, title: str) -> bool:
     """Return True if the on-disk FLAC's TITLE (parsed from the filename) is a
     match for the requested Spotify title, meaning "same recording -> skip".
 
@@ -111,7 +113,7 @@ _APPROVED_EDITIONS = {"original mix", "extended mix", "extended",
                       "studio version", "studio"}
 
 
-def _same_recording_with_edition(a, b):
+def _same_recording_with_edition(a: str, b: str) -> bool:
     """True if `a` and `b` are identical except one carries an approved-edition
     suffix (in either order). The suffix must be a parenthesised/bounded marker
     from _APPROVED_EDITIONS, attached after the shared core title.
@@ -133,7 +135,7 @@ def _same_recording_with_edition(a, b):
     return False
 
 
-def find_existing_track(out_dir, artists, title):
+def find_existing_track(out_dir: Path, artists: list[str], title: str) -> Path | None:
     """Return an existing COMPLETE audio file (FLAC or MP3) in out_dir
     matching the given track, or None.
 
@@ -151,7 +153,7 @@ def find_existing_track(out_dir, artists, title):
     return None
 
 
-def find_partial_track(out_dir, artists, title):
+def find_partial_track(out_dir: Path, artists: list[str], title: str) -> Path | None:
     """Return a PARTIAL (incomplete) audio file (FLAC or MP3) in out_dir
     matching the given track, or None.
 
@@ -174,7 +176,7 @@ def find_partial_track(out_dir, artists, title):
 # tag + rename
 # ---------------------------------------------------------------------------
 
-def tag_and_rename(flac_path, position, total):
+def tag_and_rename(flac_path: Path, position: int, total: int) -> Path:
     """Set the playlist position (NN) in the file's tag and ensure the
     filename is the bare core name, preserving the real audio extension.
 
@@ -213,7 +215,7 @@ def tag_and_rename(flac_path, position, total):
     return new_path
 
 
-def _write_position(path, position, total):
+def _write_position(path: Path, position: int, total: int) -> None:
     """Write the playlist position into the tag using the correct container
     for the file type (Vorbis TRACKNUMBER for FLAC, ID3 TRCK for MP3)."""
     if path.suffix.lower() == ".mp3":
@@ -230,7 +232,7 @@ def _write_position(path, position, total):
 # meta write
 # ---------------------------------------------------------------------------
 
-def write_meta(out_dir, spotify_url, spotify_id, name, tracks, statuses):
+def write_meta(out_dir: Path, spotify_url: str, spotify_id: str, name: str, tracks: list[Track], statuses: list[str]) -> Path:
     """Write playlist.meta.json into the playlist folder so a future sync cron
     can re-query Spotify and download only tracks not already fetched.
 
