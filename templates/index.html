@@ -407,12 +407,12 @@ const statusIcons = Object.fromEntries(
    CURRENT USER (localStorage)
    =========================================================================== */
 function getUser() {
-  var v = localStorage.getItem("music_downloader_user");
-  if (v === "tristan" || v === "marc") return v;
+  const storedUser = localStorage.getItem("music_downloader_user");
+  if (storedUser === "tristan" || storedUser === "marc") return storedUser;
   return "tristan";
 }
-function setUser(v) {
-  localStorage.setItem("music_downloader_user", v);
+function setUser(storedUser) {
+  localStorage.setItem("music_downloader_user", storedUser);
 
   for (const [fid, row] of libraryRows) {
     row.remove();
@@ -424,8 +424,8 @@ function setUser(v) {
 
 async function initUserSelect() {
   try {
-    const r = await fetch("/users");
-    const data = await r.json();
+    const response = await fetch("/users");
+    const data = await response.json();
     const sel = $("#user-select");
 
     sel.innerHTML = "";
@@ -633,9 +633,9 @@ class JobCard {
 
     this.urlEl.textContent = job.url;
 
-    const p = job.progress || {};
-    const total = p.total || 0;
-    const tracksMap = p.tracks || {};
+    const progress = job.progress || {};
+    const total = progress.total || 0;
+    const tracksMap = progress.tracks || {};
     const trackArr = Object.values(tracksMap).sort(function (a, b) { return a.pos - b.pos; });
     for (let i = 0; i < trackArr.length; i++) {
       this.upsertTrackRow(trackArr[i], total);
@@ -791,30 +791,30 @@ async function postDownload(url) {
 
   if (token) headers["X-Auth-Token"] = token;
 
-  const r = await fetch("/download?user=" + encodeURIComponent(getUser()), {
+  const response = await fetch("/download?user=" + encodeURIComponent(getUser()), {
     method: "POST", headers, body: JSON.stringify({ url })
   });
 
-  if (!r.ok) { const e = await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail || r.statusText); }
+  if (!response.ok) { const e = await response.json().catch(()=>({detail:response.statusText})); throw new Error(e.detail || response.statusText); }
 
-  return r.json();
+  return response.json();
 }
 
 async function refreshHealth() {
   try {
-    const r = await fetch("/health");
-    const h = $("#health");
+    const response = await fetch("/health");
+    const healthEl = $("#health");
 
-    if (r.ok) { h.textContent = "up"; h.className = "ok"; }
-    else { h.textContent = "down"; h.className = "bad"; }
+    if (response.ok) { healthEl.textContent = "up"; healthEl.className = "ok"; }
+    else { healthEl.textContent = "down"; healthEl.className = "bad"; }
 
   } catch { $("#health").textContent = "server down"; $("#health").className = "bad"; }
 }
 
 async function refreshJobs() {
   try {
-    const r = await fetch("/jobs?user=" + encodeURIComponent(getUser()));
-    const data = await r.json();
+    const response = await fetch("/jobs?user=" + encodeURIComponent(getUser()));
+    const data = await response.json();
 
     syncJobs(data.jobs || []);
 
@@ -840,13 +840,13 @@ function applyTrackEvent(jobId, type, event) {
    toggle() expands/collapses the track list (fetching it on first open).
    =========================================================================== */
 class LibraryRow {
-  constructor(tb, p) {
-    this.folder = p.folder;
-    this.fid = "lib-" + p.folder;
+  constructor(tb, playlist) {
+    this.folder = playlist.folder;
+    this.fid = "lib-" + playlist.folder;
 
     const row = document.createElement("tr");
     row.className = "lib-row";
-    row.dataset.folder = p.folder;
+    row.dataset.folder = playlist.folder;
     row.dataset.fid = this.fid;
     row.onclick = () => this.toggle();
 
@@ -878,7 +878,7 @@ class LibraryRow {
     updateLink.className = "update-link";
     updateLink.href = "#";
     updateLink.textContent = "update";
-    updateLink.dataset.url = p.spotify_url || "";
+    updateLink.dataset.url = playlist.spotify_url || "";
     updateLink.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -890,7 +890,7 @@ class LibraryRow {
     const zipTd = document.createElement("td");
     const zipLink = document.createElement("a");
     zipLink.className = "zip-link";
-    zipLink.href = "/zip/" + encodeURIComponent(p.folder) + "?user=" + encodeURIComponent(getUser());
+    zipLink.href = "/zip/" + encodeURIComponent(playlist.folder) + "?user=" + encodeURIComponent(getUser());
     zipLink.textContent = "zip";
     zipLink.onclick = (e) => e.stopPropagation();
     zipTd.appendChild(zipLink);
@@ -920,19 +920,19 @@ class LibraryRow {
   }
 
   // Paint the summary cells (folder / name / total / dl / miss / fetched).
-  renderSummary(p) {
+  renderSummary(playlist) {
     const cells = this.row.children;
-    cells[1].textContent = p.folder;
+    cells[1].textContent = playlist.folder;
 
-    cells[2].textContent = p.name;
+    cells[2].textContent = playlist.name;
 
-    cells[3].textContent = p.total;
+    cells[3].textContent = playlist.total;
 
-    cells[4].textContent = p.downloaded;
+    cells[4].textContent = playlist.downloaded;
 
-    cells[5].textContent = p.missed;
+    cells[5].textContent = playlist.missed;
 
-    cells[6].textContent = p.fetched_at || "";
+    cells[6].textContent = playlist.fetched_at || "";
   }
 
   // Expand/collapse the track list; fetch + cache it on first open.
@@ -948,9 +948,9 @@ class LibraryRow {
     if (!fetchedTracks[this.folder]) {
       this.inner.innerHTML = '<div class="empty">loading...</div>';
       try {
-        const r2 = await fetch("/library/" + encodeURIComponent(this.folder) + "?user=" + encodeURIComponent(getUser()));
-        const pd = await r2.json();
-        fetchedTracks[this.folder] = pd.tracks || [];
+        const response = await fetch("/library/" + encodeURIComponent(this.folder) + "?user=" + encodeURIComponent(getUser()));
+        const payload = await response.json();
+        fetchedTracks[this.folder] = payload.tracks || [];
       } catch {
         this.inner.innerHTML = '<div class="empty">failed to load</div>';
         return;
@@ -985,9 +985,9 @@ class LibraryRow {
 
 async function refreshPlaylists() {
   try {
-    const r = await fetch("/playlists?user=" + encodeURIComponent(getUser()));
-    const data = await r.json();
-    const tb = $("#playlists tbody");
+    const response = await fetch("/playlists?user=" + encodeURIComponent(getUser()));
+    const data = await response.json();
+    const tableBody = $("#playlists tbody");
 
     const rows = data.playlists || [];
     if (!rows.length) {
@@ -995,25 +995,25 @@ async function refreshPlaylists() {
         row.remove();
         libraryRows.delete(fid);
       }
-      tb.innerHTML = '<tr><td colspan="9" class="empty">No playlists yet.</td></tr>';
+      tableBody.innerHTML = '<tr><td colspan="9" class="empty">No playlists yet.</td></tr>';
       return;
     }
 
-    const emptyEl = tb.querySelector(".empty");
+    const emptyEl = tableBody.querySelector(".empty");
     if (emptyEl) emptyEl.remove();
 
     const folders = new Set();
     for (let i = 0; i < rows.length; i++) {
-      const p = rows[i];
-      const fid = "lib-" + p.folder;
+      const playlist = rows[i];
+      const fid = "lib-" + playlist.folder;
       folders.add(fid);
 
       let row = libraryRows.get(fid);
       if (!row) {
-        row = new LibraryRow(tb, p);
+        row = new LibraryRow(tableBody, playlist);
         libraryRows.set(fid, row);
       }
-      row.renderSummary(p);
+      row.renderSummary(playlist);
     }
 
     for (const [fid, row] of libraryRows) {
@@ -1029,12 +1029,12 @@ async function refreshPlaylists() {
 // Enter presses can't spam the job queue (the backend also rejects duplicate
 // active jobs, but this gives immediate visual feedback and stops the race).
 function setGoBusy(on) {
-  const go = document.getElementById("go");
-  if (go) go.disabled = on;
+  const button = document.getElementById("go");
+  if (button) button.disabled = on;
 }
 function setSyncBusy(on) {
-  const s = document.getElementById("sync");
-  if (s) s.disabled = on;
+  const button = document.getElementById("sync");
+  if (button) button.disabled = on;
 }
 
 $("#go").addEventListener("click", async () => {
@@ -1045,16 +1045,16 @@ $("#go").addEventListener("click", async () => {
   $("#msg").textContent = "starting...";
 
   try {
-    const r = await postDownload(url);
-    $("#msg").textContent = "job " + r.job_id + " started";
+    const response = await postDownload(url);
+    $("#msg").textContent = "job " + response.job_id + " started";
     $("#url").value = "";
 
     // Ensure the job card exists, then open SSE for live progress
-    const job = { id: r.job_id, url: url, user: getUser(), status: "running" };
+    const job = { id: response.job_id, url: url, user: getUser(), status: "running" };
     const card = ensureJobCard(job);
     card.renderSnapshot(job);
 
-    JobCard.collapseOthers(r.job_id);
+    JobCard.collapseOthers(response.job_id);
     card.setOpen(true);
 
     // One-time fetch of the list view (lightweight)
@@ -1070,11 +1070,11 @@ async function postSync() {
   const headers = { "Content-Type": "application/json" };
   if (token) headers["X-Auth-Token"] = token;
 
-  const r = await fetch("/sync", { method: "POST", headers });
-  if (r.status === 409) throw new Error("sync already running");
-  if (!r.ok) { const e = await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail || r.statusText); }
+  const response = await fetch("/sync", { method: "POST", headers });
+  if (response.status === 409) throw new Error("sync already running");
+  if (!response.ok) { const e = await response.json().catch(()=>({detail:response.statusText})); throw new Error(e.detail || response.statusText); }
 
-  return r.json();
+  return response.json();
 }
 
 // Manually trigger a sync: enqueue a job for every known playlist. The jobs
@@ -1083,9 +1083,9 @@ $("#sync").addEventListener("click", async () => {
   $("#msg").textContent = "syncing all playlists...";
   setSyncBusy(true);
   try {
-    const r = await postSync();
+    const response = await postSync();
 
-    $("#msg").textContent = "queued " + r.queued + " playlist job(s)";
+    $("#msg").textContent = "queued " + response.queued + " playlist job(s)";
     refreshJobs();
 
   } catch (e) {
@@ -1111,10 +1111,10 @@ async function startUpdate(url) {
   $("#msg").textContent = "updating playlist...";
 
   try {
-    const r = await postDownload(url);
-    $("#msg").textContent = "job " + r.job_id + " started (update)";
+    const response = await postDownload(url);
+    $("#msg").textContent = "job " + response.job_id + " started (update)";
 
-    const job = { id: r.job_id, url: url, user: getUser(), status: "running" };
+    const job = { id: response.job_id, url: url, user: getUser(), status: "running" };
     ensureJobCard(job).renderSnapshot(job);
 
     refreshJobs();
@@ -1134,58 +1134,58 @@ async function startUpdate(url) {
   var wasDown = false;
 
   function setBadge(up) {
-    var h = $("#health");
-    if (!h) return;
-    h.textContent = up ? "up" : "server down";
-    h.className = up ? "ok" : "bad";
+    var healthEl = $("#health");
+    if (!healthEl) return;
+    healthEl.textContent = up ? "up" : "server down";
+    healthEl.className = up ? "ok" : "bad";
   }
   function showOverlay(on) {
-    var ov = document.getElementById("serverOverlay");
-    if (ov) ov.classList.toggle("show", on);
+    var overlay = document.getElementById("serverOverlay");
+    if (overlay) overlay.classList.toggle("show", on);
     // disable the user dropdown while disconnected so no requests are sent
     var sel = document.getElementById("user-select");
     if (sel) sel.disabled = on;
   }
 
-  const es = new EventSource("/jobs/stream");
+  const eventSource = new EventSource("/jobs/stream");
 
-  es.addEventListener("job_created", function(e) {
-    const d = JSON.parse(e.data);
-    const j = d.job;
-    ensureJobCard({ id: j.id, url: j.url, user: j.user, name: j.name, status: j.status || "running" });
-    ensureJobCard(j).renderSnapshot(j);
+  eventSource.addEventListener("job_created", function(e) {
+    const event = JSON.parse(e.data);
+    const job = event.job;
+    ensureJobCard({ id: job.id, url: job.url, user: job.user, name: job.name, status: job.status || "running" });
+    ensureJobCard(job).renderSnapshot(job);
   });
 
   // Per-track progress is relayed by the backend for EVERY job; apply to its card.
   ["tracks", "start", "pct", "done"].forEach(function(type) {
-    es.addEventListener(type, function(e) {
-      const d = JSON.parse(e.data);
-      ensureJobCard({ id: d.job_id, url: "", user: "", status: "running" });
-      applyTrackEvent(d.job_id, type, d);
+    eventSource.addEventListener(type, function(e) {
+      const event = JSON.parse(e.data);
+      ensureJobCard({ id: event.job_id, url: "", user: "", status: "running" });
+      applyTrackEvent(event.job_id, type, event);
     });
   });
 
-  es.addEventListener("job_done", function(e) {
-    const d = JSON.parse(e.data);
-    ensureJobCard(d.job).renderSnapshot(d.job);
+  eventSource.addEventListener("job_done", function(e) {
+    const event = JSON.parse(e.data);
+    ensureJobCard(event.job).renderSnapshot(event.job);
     refreshPlaylists();
   });
 
   // Download actually began (after the DZ_LOCK wait): re-render so the start
   // time shows the real download-start, not the enqueue/sync time.
-  es.addEventListener("job_started", function(e) {
-    const d = JSON.parse(e.data);
-    if (d.job) ensureJobCard(d.job).renderSnapshot(d.job);
+  eventSource.addEventListener("job_started", function(e) {
+    const event = JSON.parse(e.data);
+    if (event.job) ensureJobCard(event.job).renderSnapshot(event.job);
   });
 
-  es.onopen = function() {
+  eventSource.onopen = function() {
     setBadge(true);
     showOverlay(false);
     // Reconnect after an outage: reload once to re-fetch the job list / state.
     if (wasDown) { wasDown = false; location.reload(); }
   };
 
-  es.onerror = function() {
+  eventSource.onerror = function() {
     wasDown = true;
     setBadge(false);
     showOverlay(true);
