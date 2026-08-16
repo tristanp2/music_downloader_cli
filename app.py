@@ -783,7 +783,7 @@ def download_zip(request: Request, folder: str):
 
 
 @app.post("/reload")
-def reload(request: Request, payload: dict = None):
+def reload(request: Request, payload: dict | None = None):
     _authenticate(request)
     global DZ
     if not ARL.is_file():
