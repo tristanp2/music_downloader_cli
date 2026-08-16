@@ -413,11 +413,13 @@ function getUser() {
 }
 function setUser(v) {
   localStorage.setItem("music_downloader_user", v);
+
   for (var fid in knownLib) {
     knownLib[fid].row.remove();
     knownLib[fid].detail.remove();
     delete knownLib[fid];
   }
+
   for (var folder in fetchedTracks) delete fetchedTracks[folder];
 }
 
@@ -426,7 +428,9 @@ async function initUserSelect() {
     const r = await fetch("/users");
     const data = await r.json();
     const sel = $("#user-select");
+
     sel.innerHTML = "";
+
     var users = data.users || [];
     for (var i = 0; i < users.length; i++) {
       var opt = document.createElement("option");
@@ -434,6 +438,7 @@ async function initUserSelect() {
       opt.textContent = users[i];
       sel.appendChild(opt);
     }
+
     var saved = localStorage.getItem("music_downloader_user");
     sel.value = saved && users.indexOf(saved) !== -1 ? saved : (data.default || "");
     sel.addEventListener("change", function() {
@@ -441,8 +446,10 @@ async function initUserSelect() {
       refreshPlaylists();
       refreshJobs();
     });
+
   } catch {
     var sel = $("#user-select");
+
     sel.innerHTML = '<option value="tristan">tristan</option>';
     sel.value = getUser();
     sel.addEventListener("change", function() {
@@ -452,15 +459,16 @@ async function initUserSelect() {
     });
   }
 }
+
 initUserSelect();
 
 /* ===========================================================================
    KEYED DOM RENDERING (state-backed virtual-ish DOM)
-   - knownJobs:   rendered job cards, keyed by job id
+   - knownCards:  JobCard instances, keyed by job id
    - knownLib:    rendered library rows, keyed by "lib-<folder>"
    - fetchedTracks: raw /library/<folder> payloads, keyed by folder (cache)
    =========================================================================== */
-const knownJobs = {};
+const knownCards = new Map();  // jobId -> JobCard instance
 const knownLib = {};
 const fetchedTracks = {};
 
@@ -475,187 +483,269 @@ function fmtClock(ts) {
   return ts.length >= 19 ? ts.slice(11, 19) : ts;
 }
 
+/* ===========================================================================
+   TrackRow  (one per track inside a JobCard's track list)
+   Wraps a single .track-row element; create-if-missing then update.
+   =========================================================================== */
+class TrackRow {
+  constructor(listEl, track, total) {
+    let row = listEl.querySelector('.track-row[data-pos="' + track.pos + '"]');
+    if (!row) {
+      row = document.createElement("div");
+      row.className = "track-row";
+      row.dataset.pos = track.pos;
+      row.dataset.status = track.status;
+
+      const posEl = document.createElement("span");
+      posEl.className = "pos";
+      row.appendChild(posEl);
+
+      const nameSpan = document.createElement("span");
+      nameSpan.className = "track-name";
+      row.appendChild(nameSpan);
+
+      const barWrap = document.createElement("div");
+      barWrap.className = "mini-bar";
+      const barFill = document.createElement("div");
+      barFill.className = "fill";
+      barWrap.appendChild(barFill);
+      row.appendChild(barWrap);
+
+      const statusEl = document.createElement("span");
+      statusEl.className = "track-status";
+      row.appendChild(statusEl);
+
+      listEl.appendChild(row);
+    }
+    this.el = row;
+    this.listEl = listEl;
+    this.render(track, total);
+  }
+
+  render(track, total) {
+    this.listEl.querySelector('.track-row[data-pos="' + track.pos + '"]');
+    const row = this.el;
+
+    row.querySelector(".pos").textContent = track.pos + "/" + total;
+
+    const nameSpan = row.querySelector(".track-name");
+    nameSpan.textContent = track.name;
+    nameSpan.title = track.name;
+    nameSpan.className = "track-name" + (track.status === "pending" ? " pending" : "");
+
+    const barWrap = row.querySelector(".mini-bar");
+    const barFill = row.querySelector(".mini-bar .fill");
+    const showBar = (track.status === "downloading" || track.status === "downloaded" || track.status === "skipped");
+    barWrap.style.display = showBar ? "" : "none";
+    if (track.status === "downloading") {
+      barFill.style.width = (track.pct != null ? track.pct : 0) + "%";
+      barFill.className = "fill";
+    } else {
+      barFill.style.width = "100%";
+      barFill.className = "fill done";
+    }
+
+    const statusEl = row.querySelector(".track-status");
+    statusEl.className = "track-status " + track.status;
+    statusEl.textContent = statusIcons[track.status] || "";
+  }
+}
+
+/* ===========================================================================
+   JobCard  (one per job; owns its DOM, receives SSE events + snapshot renders)
+   The single global job_feed SSE (see jobFeed()) routes events here via
+   applyEvent(type, event); renderSnapshot(job) handles the load/refresh reconcile.
+   =========================================================================== */
+class JobCard {
+  constructor(j) {
+    this.id = j.id;
+    this.open = false;
+    this.counts = { downloaded: 0, skipped: 0, missed: 0, failed: 0 };
+    this.rows = new Map();  // pos -> TrackRow
+
+    const card = document.createElement("div");
+    card.className = "job " + j.status;
+    card.dataset.job = j.id;
+
+    const header = document.createElement("div");
+    header.className = "job-header";
+    header.dataset.job = j.id;
+
+    const chevEl = document.createElement("span");
+    chevEl.className = "job-chevron";
+    chevEl.textContent = "\u25b6";
+    header.appendChild(chevEl);
+
+    const metaEl = document.createElement("div");
+    metaEl.className = "meta";
+    header.appendChild(metaEl);
+
+    const resultsEl = document.createElement("div");
+    resultsEl.className = "results";
+    header.appendChild(resultsEl);
+
+    card.appendChild(header);
+
+    const urlEl = document.createElement("div");
+    urlEl.className = "job-url";
+    urlEl.style.display = "none";
+    card.appendChild(urlEl);
+
+    const listEl = document.createElement("div");
+    listEl.className = "track-list";
+    listEl.style.display = "none";
+    card.appendChild(listEl);
+
+    header.addEventListener("click", () => {
+      this.setOpen(!this.open);
+    });
+
+    this.el = card;
+    this.headerEl = header;
+    this.chevEl = chevEl;
+    this.metaEl = metaEl;
+    this.resultsEl = resultsEl;
+    this.urlEl = urlEl;
+    this.listEl = listEl;
+
+    $("#jobs").appendChild(card);
+    const empty = $("#jobs .empty");
+    if (empty) empty.remove();
+  }
+
+  setOpen(open) {
+    this.open = open;
+    this.el.classList.toggle("open", open);
+    this.chevEl.classList.toggle("open", open);
+    this.headerEl.classList.toggle("open", open);
+    this.listEl.style.display = open ? "" : "none";
+    this.urlEl.style.display = open ? "" : "none";
+  }
+
+  // Full reconcile from a job snapshot (used on load + user-triggered refresh).
+  renderSnapshot(job) {
+    this.el.className = "job " + (job.status === "done" ? "done" : job.status === "error" ? "error" : "running");
+
+    const badgeStatus = job.status === "done" ? "done" : job.status === "error" ? "error" : "running";
+    const nameHtml = job.name ? '<span class="pname">' + esc(job.name) + "</span> &nbsp; " : "";
+    this.metaEl.innerHTML = '<span class="badge ' + badgeStatus + '">' + esc(job.status) + "</span> &nbsp; " + nameHtml
+      + '<span class="clock" title="started">st: ' + fmtClock(job.started_at) + "</span>"
+      + '<span class="clock" title="finished">et: ' + fmtClock(job.finished_at) + "</span>";
+
+    this.urlEl.textContent = job.url;
+
+    const p = job.progress || {};
+    const total = p.total || 0;
+    const tracksMap = p.tracks || {};
+    const trackArr = Object.values(tracksMap).sort(function (a, b) { return a.pos - b.pos; });
+    for (let i = 0; i < trackArr.length; i++) {
+      this.upsertTrackRow(trackArr[i], total);
+    }
+
+    // Keep the list visible if rows are already rendered (live SSE) so finished
+    // jobs keep showing their tracks -- they only vanish when the card is removed.
+    const hasRows = this.listEl.querySelectorAll(".track-row").length > 0;
+    const shouldShow = (hasRows || trackArr.length || job.status === "running");
+    if (shouldShow && this.open) this.setOpen(true);
+
+    if (job.result && job.result.ok) {
+      this.counts = {
+        downloaded: job.result.downloaded || 0,
+        skipped: job.result.skipped || 0,
+        missed: job.result.missed || 0,
+        failed: job.result.failed || 0,
+      };
+      this.paintChips();
+    } else if (job.result && job.result.error) {
+      this.resultsEl.innerHTML = '<span class="chip err">error</span>';
+    } else {
+      this.paintChips();
+    }
+  }
+
+  // Per-track SSE event router.
+  applyEvent(type, event) {
+    if (type === "tracks") {
+      this.counts = { downloaded: 0, skipped: 0, missed: 0, failed: 0 };
+      for (let i = 0; i < event.items.length; i++) {
+        this.upsertTrackRow({ pos: event.items[i].pos, name: event.items[i].name, status: "pending", pct: 0 }, event.total);
+      }
+      this.paintChips();
+
+    } else if (type === "start") {
+      const row = this.rows.get(event.pos);
+      if (row) row.render({ pos: event.pos, name: event.name, status: "downloading", pct: 0 }, this.listEl.querySelectorAll(".track-row").length);
+
+    } else if (type === "pct") {
+      // A mid-range PCT (1-99%) means the progress bar is actively filling --
+      // expand this card so the user sees live progress. Do it once.
+      if (!this.open && event.pct > 0 && event.pct < 100) {
+        JobCard.collapseOthers(this.id);
+        this.setOpen(true);
+      }
+
+      const row = this.rows.get(event.pos);
+      if (!row) return;
+      const barFill = row.el.querySelector(".mini-bar .fill");
+      if (barFill) { barFill.style.width = (event.pct || 0) + "%"; barFill.className = "fill"; }
+      const barWrap = row.el.querySelector(".mini-bar");
+      if (barWrap) barWrap.style.display = "";
+      const statusEl = row.el.querySelector(".track-status");
+      if (statusEl) { statusEl.className = "track-status downloading"; statusEl.textContent = statusIcons.downloading; }
+
+    } else if (type === "done") {
+      const row = this.rows.get(event.pos);
+      if (row) {
+        const name = row.el.querySelector(".track-name").textContent;
+        row.render({ pos: event.pos, name: name, status: event.status, pct: event.pct }, this.listEl.querySelectorAll(".track-row").length);
+      }
+
+      if (event.status in this.counts) this.counts[event.status]++;
+      this.paintChips();
+    }
+  }
+
+  upsertTrackRow(track, total) {
+    const existing = this.rows.get(track.pos);
+    if (existing) { existing.render(track, total); return existing; }
+
+    const row = new TrackRow(this.listEl, track, total);
+    this.rows.set(track.pos, row);
+
+    return row;
+  }
+
+  // Paint this card's live tally (this.counts) into the results element.
+  paintChips() {
+    const order = ["downloaded", "skipped", "missed", "failed"];
+    const cls = { downloaded: "ok", skipped: "warn", missed: "miss", failed: "err" };
+    const chip = (n, label, c) => '<span class="chip ' + c + '">' + label + ' ' + n + '</span>';
+
+    this.resultsEl.innerHTML = order.map((name) =>
+      chip(this.counts[name] || 0, STATUS[name].chip, cls[name])
+    ).join("");
+  }
+
+  remove() {
+    this.el.remove();
+  }
+
+  // Collapse every other card so the newest stays expanded by default.
+  static collapseOthers(exceptId) {
+    for (const [id, card] of knownCards) {
+      if (id !== exceptId) card.setOpen(false);
+    }
+  }
+}
+
+// --- registry factory: lookup-or-create a JobCard for a job id ---
 function ensureJobCard(j) {
-  let ctx = knownJobs[j.id];
-  if (ctx) return ctx;
-
-  const card = document.createElement("div");
-  card.className = "job " + j.status;
-  card.dataset.job = j.id;
-
-  // Collapsible header: chevron + badge + name + url + result chips.
-  const header = document.createElement("div");
-  header.className = "job-header";
-  header.dataset.job = j.id;
-
-  const chevEl = document.createElement("span");
-  chevEl.className = "job-chevron";
-  chevEl.textContent = "\u25b6";
-  header.appendChild(chevEl);
-
-  const metaEl = document.createElement("div");
-  metaEl.className = "meta";
-  header.appendChild(metaEl);
-
-  const resultsEl = document.createElement("div");
-  resultsEl.className = "results";
-  header.appendChild(resultsEl);
-
-  card.appendChild(header);
-
-  const urlEl = document.createElement("div");
-  urlEl.className = "job-url";
-  urlEl.style.display = "none";
-  card.appendChild(urlEl);
-
-  const listEl = document.createElement("div");
-  listEl.className = "track-list";
-  listEl.style.display = "none";
-  card.appendChild(listEl);
-
-  header.addEventListener("click", function() {
-    const open = card.classList.toggle("open");
-    setJobOpen(knownJobs[j.id], open);
-  });
-
-  $("#jobs").appendChild(card);
-  const empty = $("#jobs .empty");
-  if (empty) empty.remove();
-
-  ctx = { el: card, header, chevEl, metaEl, listEl, urlEl, resultsEl, open: false,
-          counts: { downloaded: 0, skipped: 0, missed: 0, failed: 0 } };
-  knownJobs[j.id] = ctx;
-  return ctx;
-}
-
-function setJobOpen(ctx, open) {
-  ctx.open = open;
-  ctx.el.classList.toggle("open", open);
-  ctx.chevEl.classList.toggle("open", open);
-  ctx.header.classList.toggle("open", open);
-  ctx.listEl.style.display = open ? "" : "none";
-  ctx.urlEl.style.display = open ? "" : "none";
-}
-
-// Collapse every other job card when a new job starts, so the newest stays
-// the one expanded by default.
-function collapseOthers(exceptId) {
-  for (const id in knownJobs) {
-    if (id === exceptId) continue;
-    setJobOpen(knownJobs[id], false);
+  let card = knownCards.get(j.id);
+  if (!card) {
+    card = new JobCard(j);
+    knownCards.set(j.id, card);
   }
-}
-
-function renderTrackRow(listEl, track, total) {
-  let row = listEl.querySelector('.track-row[data-pos="' + track.pos + '"]');
-  if (!row) {
-    row = document.createElement("div");
-    row.className = "track-row";
-    row.dataset.pos = track.pos;
-    row.dataset.status = track.status;
-
-    const posEl = document.createElement("span");
-    posEl.className = "pos";
-    row.appendChild(posEl);
-
-    const nameSpan = document.createElement("span");
-    nameSpan.className = "track-name";
-    row.appendChild(nameSpan);
-
-    const barWrap = document.createElement("div");
-    barWrap.className = "mini-bar";
-    const barFill = document.createElement("div");
-    barFill.className = "fill";
-    barWrap.appendChild(barFill);
-    row.appendChild(barWrap);
-
-    const statusEl = document.createElement("span");
-    statusEl.className = "track-status";
-    row.appendChild(statusEl);
-
-    listEl.appendChild(row);
-  }
-
-  row.querySelector(".pos").textContent = track.pos + "/" + total;
-
-  const nameSpan2 = row.querySelector(".track-name");
-  nameSpan2.textContent = track.name;
-  nameSpan2.title = track.name;
-  nameSpan2.className = "track-name" + (track.status === "pending" ? " pending" : "");
-
-  const barWrap2 = row.querySelector(".mini-bar");
-  const barFill2 = row.querySelector(".mini-bar .fill");
-  const showBar = (track.status === "downloading" || track.status === "downloaded" || track.status === "skipped");
-  barWrap2.style.display = showBar ? "" : "none";
-  if (track.status === "downloading") {
-    barFill2.style.width = (track.pct != null ? track.pct : 0) + "%";
-    barFill2.className = "fill";
-  } else {
-    barFill2.style.width = "100%";
-    barFill2.className = "fill done";
-  }
-
-  const statusEl2 = row.querySelector(".track-status");
-  statusEl2.className = "track-status " + track.status;
-  statusEl2.textContent = statusIcons[track.status] || "";
-}
-
-function updateJobCard(j) {
-  const ctx = ensureJobCard(j);
-  const { el, metaEl, listEl, urlEl, resultsEl } = ctx;
-
-  el.className = "job " + (j.status === "done" ? "done" : j.status === "error" ? "error" : "running");
-
-  const badgeStatus = j.status === "done" ? "done" : j.status === "error" ? "error" : "running";
-  const nameHtml = j.name ? '<span class="pname">' + esc(j.name) + '</span> &nbsp; ' : "";
-  metaEl.innerHTML = '<span class="badge ' + badgeStatus + '">' + esc(j.status) + '</span> &nbsp; ' + nameHtml
-    + '<span class="clock" title="started">st: ' + fmtClock(j.started_at) + '</span>'
-    + '<span class="clock" title="finished">et: ' + fmtClock(j.finished_at) + '</span>';
-
-  // URL shown in the body, above the track list.
-  urlEl.textContent = j.url;
-
-  const p = j.progress || {};
-  const total = p.total || 0;
-  const tracksMap = p.tracks || {};
-  const trackArr = Object.values(tracksMap).sort(function(a, b) { return a.pos - b.pos; });
-  for (let i = 0; i < trackArr.length; i++) {
-    renderTrackRow(listEl, trackArr[i], total);
-  }
-
-  // Keep the list visible if rows are already rendered (live SSE) so finished
-  // jobs keep showing their tracks -- they only vanish when the card is removed
-  // (another job starts and this one scrolls out / is pruned).
-  const hasRows = listEl.querySelectorAll(".track-row").length > 0;
-  const shouldShow = (hasRows || trackArr.length || j.status === "running");
-  if (shouldShow && ctx.open) setJobOpen(ctx, true);
-
-  // Result chips in the title bar.
-  if (j.result && j.result.ok) {
-    paintChips(resultsEl, j.result);
-  } else if (j.result && j.result.error) {
-    resultsEl.innerHTML = '<span class="chip err">error</span>';
-  } else {
-    // Live phase: paint whatever the in-memory tally currently holds (the SSE
-    // done events increment it). Empty until the first track finishes.
-    paintChips(resultsEl, ctx.counts);
-  }
-}
-function paintChips(resultsEl, counts) {
-  resultsEl.innerHTML = resultChips(counts)
-}
-
-function resultChips(r) {
-  // Order matches the STATUS tally keys; labels + colors come from STATUS so
-  // they stay in sync with the rest of the app.
-  const order = ["downloaded", "skipped", "missed", "failed"];
-  const cls = { downloaded: "ok", skipped: "warn", missed: "miss", failed: "err" };
-  const chip = function(n, label, c) {
-    return '<span class="chip ' + c + '">' + label + ' ' + n + '</span>';
-  };
-  return order.map(function(name) {
-    return chip(r[name] || 0, STATUS[name].chip, cls[name]);
-  }).join("");
+  return card;
 }
 
 function syncJobs(jobs) {
@@ -665,13 +755,13 @@ function syncJobs(jobs) {
   }
 
   for (let i = 0; i < jobs.length; i++) {
-    updateJobCard(jobs[i]);
+    ensureJobCard(jobs[i]).renderSnapshot(jobs[i]);
   }
 
-  for (const id in knownJobs) {
+  for (const [id, card] of knownCards) {
     if (!jobIds.has(id)) {
-      knownJobs[id].el.remove();
-      delete knownJobs[id];
+      card.remove();
+      knownCards.delete(id);
     }
   }
 
@@ -683,7 +773,7 @@ function syncJobs(jobs) {
     if (!first) break;
     const rid = first.dataset.job;
     first.remove();
-    if (knownJobs[rid]) delete knownJobs[rid];
+    if (knownCards.has(rid)) knownCards.delete(rid);
   }
 
   if (!jobs.length) {
@@ -699,11 +789,15 @@ function syncJobs(jobs) {
    =========================================================================== */
 async function postDownload(url) {
   const headers = { "Content-Type": "application/json" };
+
   if (token) headers["X-Auth-Token"] = token;
+
   const r = await fetch("/download?user=" + encodeURIComponent(getUser()), {
     method: "POST", headers, body: JSON.stringify({ url })
   });
+
   if (!r.ok) { const e = await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail || r.statusText); }
+
   return r.json();
 }
 
@@ -711,8 +805,10 @@ async function refreshHealth() {
   try {
     const r = await fetch("/health");
     const h = $("#health");
+
     if (r.ok) { h.textContent = "up"; h.className = "ok"; }
     else { h.textContent = "down"; h.className = "bad"; }
+
   } catch { $("#health").textContent = "server down"; $("#health").className = "bad"; }
 }
 
@@ -720,70 +816,32 @@ async function refreshJobs() {
   try {
     const r = await fetch("/jobs?user=" + encodeURIComponent(getUser()));
     const data = await r.json();
+
     syncJobs(data.jobs || []);
+
   } catch {}
 }
 
 /* ===========================================================================
-   SHARED TRACK-PROGRESS RENDERER (driven by the ONE job-feed SSE)
+   SHARED TRACK-PROGRESS DISPATCHER (driven by the ONE job-feed SSE)
+   Thin router: look up the card and hand the event to its applyEvent method.
+   All per-card rendering lives in JobCard.applyEvent.
    =========================================================================== */
-function applyTrackEvent(jobId, type, d) {
-  const ctx = knownJobs[jobId];
-  if (!ctx) return;
+function applyTrackEvent(jobId, type, event) {
+  const card = knownCards.get(jobId);
 
-  if (type === "tracks") {
-    // This job has begun actively downloading (TRACKS fires once up front).
-    ctx.counts = { downloaded: 0, skipped: 0, missed: 0, failed: 0 };
-    for (let i = 0; i < d.items.length; i++) {
-      const t = { pos: d.items[i].pos, name: d.items[i].name, status: "pending", pct: 0 };
-      renderTrackRow(ctx.listEl, t, d.total);
-    }
+  if (!card) return;
 
-    // paint the (zeroed) tallies in the header
-    paintChips(ctx.resultsEl, ctx.counts);
-  } else if (type === "start") {
-    const row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
-    if (row) {
-      row.querySelector(".track-name").className = "track-name";
-      renderTrackRow(ctx.listEl, { pos: d.pos, name: d.name, status: "downloading", pct: 0 }, ctx.listEl.querySelectorAll(".track-row").length);
-    }
-  } else if (type === "pct") {
-    // A mid-range PCT (1-99%) means the progress bar is actively filling --
-    // that's the moment to focus this job: collapse others and expand the body.
-    // Rule: "show the body if the progress bar is actually moving." Do it once.
-    if (!ctx.open && d.pct > 0 && d.pct < 100) {
-      collapseOthers(jobId);
-      setJobOpen(ctx, true);
-    }
-    const row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
-    if (!row) return;
-    const barFill = row.querySelector(".mini-bar .fill");
-    if (barFill) { barFill.style.width = (d.pct || 0) + "%"; barFill.className = "fill"; }
-    const barWrap = row.querySelector(".mini-bar");
-    if (barWrap) barWrap.style.display = "";
-    const statusEl = row.querySelector(".track-status");
-    if (statusEl) { statusEl.className = "track-status downloading"; statusEl.textContent = statusIcons.downloading; }
-  } else if (type === "done") {
-    // A track finished. (The body's auto-open is handled on the first non-zero
-    // PCT -- "if a progress bar moves, open the body" -- so we don't open here.)
-    const row = ctx.listEl.querySelector('.track-row[data-pos="' + d.pos + '"]');
-    if (row) {
-      const existingName = row.querySelector(".track-name").textContent;
-      renderTrackRow(ctx.listEl, { pos: d.pos, name: existingName, status: d.status, pct: d.pct }, ctx.listEl.querySelectorAll(".track-row").length);
-    }
-    // bump the in-memory tally and repaint -- independent of the DOM, so a
-    // missing row can never stop the chips from ticking up.
-    if (d.status in ctx.counts) ctx.counts[d.status]++;
-    paintChips(ctx.resultsEl, ctx.counts);
-  }
+  card.applyEvent(type, event);
 }
 
 async function refreshPlaylists() {
   try {
     const r = await fetch("/playlists?user=" + encodeURIComponent(getUser()));
     const data = await r.json();
-    const rows = data.playlists || [];
     const tb = $("#playlists tbody");
+
+    const rows = data.playlists || [];
     if (!rows.length) {
       for (const folder in knownLib) {
         knownLib[folder].row.remove();
@@ -793,6 +851,7 @@ async function refreshPlaylists() {
       tb.innerHTML = '<tr><td colspan="9" class="empty">No playlists yet.</td></tr>';
       return;
     }
+
     const emptyEl = tb.querySelector(".empty");
     if (emptyEl) emptyEl.remove();
 
@@ -817,16 +876,22 @@ async function refreshPlaylists() {
 
         const folderTd = document.createElement("td");
         row.appendChild(folderTd);
+
         const nameTd = document.createElement("td");
         row.appendChild(nameTd);
+
         const totalTd = document.createElement("td");
         row.appendChild(totalTd);
+
         const dlTd = document.createElement("td");
         row.appendChild(dlTd);
+
         const missTd = document.createElement("td");
         row.appendChild(missTd);
+
         const fetchTd = document.createElement("td");
         row.appendChild(fetchTd);
+
         const updateTd = document.createElement("td");
         const updateLink = document.createElement("a");
         updateLink.className = "update-link";
@@ -840,6 +905,7 @@ async function refreshPlaylists() {
         };
         updateTd.appendChild(updateLink);
         row.appendChild(updateTd);
+
         const zipTd = document.createElement("td");
         const zipLink = document.createElement("a");
         zipLink.className = "zip-link";
@@ -852,11 +918,14 @@ async function refreshPlaylists() {
         const detail = document.createElement("tr");
         detail.className = "lib-detail";
         detail.dataset.fid = fid;
+
         const detailTd = document.createElement("td");
         detailTd.colSpan = 9;
+
         const inner = document.createElement("div");
         inner.className = "lib-detail-inner";
         inner.id = "inner-" + fid;
+
         detailTd.appendChild(inner);
         detail.appendChild(detailTd);
 
@@ -869,10 +938,15 @@ async function refreshPlaylists() {
 
       const cells = ctx.row.children;
       cells[1].textContent = p.folder;
+
       cells[2].textContent = p.name;
+
       cells[3].textContent = p.total;
+
       cells[4].textContent = p.downloaded;
+
       cells[5].textContent = p.missed;
+
       cells[6].textContent = p.fetched_at || "";
     }
 
@@ -947,17 +1021,23 @@ function setSyncBusy(on) {
 $("#go").addEventListener("click", async () => {
   const url = $("#url").value.trim();
   if (!url) return;
+
   setGoBusy(true);
   $("#msg").textContent = "starting...";
+
   try {
     const r = await postDownload(url);
     $("#msg").textContent = "job " + r.job_id + " started";
     $("#url").value = "";
+
     // Ensure the job card exists, then open SSE for live progress
-    var ctx = ensureJobCard({ id: r.job_id, url: url, user: getUser(), status: "running" });
-    updateJobCard({ id: r.job_id, url: url, user: getUser(), status: "running" });
-    collapseOthers(r.job_id);
-    setJobOpen(ctx, true);
+    const job = { id: r.job_id, url: url, user: getUser(), status: "running" };
+    const card = ensureJobCard(job);
+    card.renderSnapshot(job);
+
+    JobCard.collapseOthers(r.job_id);
+    card.setOpen(true);
+
     // One-time fetch of the list view (lightweight)
     refreshJobs();
   } catch (e) {
@@ -970,9 +1050,11 @@ $("#go").addEventListener("click", async () => {
 async function postSync() {
   const headers = { "Content-Type": "application/json" };
   if (token) headers["X-Auth-Token"] = token;
+
   const r = await fetch("/sync", { method: "POST", headers });
   if (r.status === 409) throw new Error("sync already running");
   if (!r.ok) { const e = await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail || r.statusText); }
+
   return r.json();
 }
 
@@ -983,8 +1065,10 @@ $("#sync").addEventListener("click", async () => {
   setSyncBusy(true);
   try {
     const r = await postSync();
+
     $("#msg").textContent = "queued " + r.queued + " playlist job(s)";
     refreshJobs();
+
   } catch (e) {
     $("#msg").textContent = "sync error: " + e.message;
   } finally {
@@ -1006,11 +1090,14 @@ $("#url").addEventListener("keydown", (e) => {
 async function startUpdate(url) {
   if (!url) { $("#msg").textContent = "error: playlist has no stored Spotify URL"; return; }
   $("#msg").textContent = "updating playlist...";
+
   try {
     const r = await postDownload(url);
     $("#msg").textContent = "job " + r.job_id + " started (update)";
-    var ctx = ensureJobCard({ id: r.job_id, url: url, user: getUser(), status: "running" });
-    updateJobCard({ id: r.job_id, url: url, user: getUser(), status: "running" });
+
+    const job = { id: r.job_id, url: url, user: getUser(), status: "running" };
+    ensureJobCard(job).renderSnapshot(job);
+
     refreshJobs();
   } catch (e) {
     $("#msg").textContent = "error: " + e.message;
@@ -1026,6 +1113,7 @@ async function startUpdate(url) {
    =========================================================================== */
 (function jobFeed() {
   var wasDown = false;
+
   function setBadge(up) {
     var h = $("#health");
     if (!h) return;
@@ -1039,17 +1127,16 @@ async function startUpdate(url) {
     var sel = document.getElementById("user-select");
     if (sel) sel.disabled = on;
   }
+
   const es = new EventSource("/jobs/stream");
+
   es.addEventListener("job_created", function(e) {
     const d = JSON.parse(e.data);
     const j = d.job;
     ensureJobCard({ id: j.id, url: j.url, user: j.user, name: j.name, status: j.status || "running" });
-    updateJobCard(j);
-    // NOTE: do NOT auto-open/collapse here. A freshly created job is usually
-    // still queued behind the DZ_LOCK, not actively downloading -- opening it
-    // would collapse the job that is *actually* running. The active job gets
-    // focused when its TRACKS event arrives (see applyTrackEvent / "tracks").
+    ensureJobCard(j).renderSnapshot(j);
   });
+
   // Per-track progress is relayed by the backend for EVERY job; apply to its card.
   ["tracks", "start", "pct", "done"].forEach(function(type) {
     es.addEventListener(type, function(e) {
@@ -1058,23 +1145,27 @@ async function startUpdate(url) {
       applyTrackEvent(d.job_id, type, d);
     });
   });
+
   es.addEventListener("job_done", function(e) {
     const d = JSON.parse(e.data);
-    updateJobCard(d.job);
+    ensureJobCard(d.job).renderSnapshot(d.job);
     refreshPlaylists();
   });
+
   // Download actually began (after the DZ_LOCK wait): re-render so the start
   // time shows the real download-start, not the enqueue/sync time.
   es.addEventListener("job_started", function(e) {
     const d = JSON.parse(e.data);
-    if (d.job) updateJobCard(d.job);
+    if (d.job) ensureJobCard(d.job).renderSnapshot(d.job);
   });
+
   es.onopen = function() {
     setBadge(true);
     showOverlay(false);
     // Reconnect after an outage: reload once to re-fetch the job list / state.
     if (wasDown) { wasDown = false; location.reload(); }
   };
+
   es.onerror = function() {
     wasDown = true;
     setBadge(false);
