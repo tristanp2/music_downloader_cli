@@ -174,7 +174,7 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
 
         # search
         report(f"[{pos}/{total}] {display[:60]}")
-        hit = deezer_search(dz, q, target_title=t.name, target_artists=t.artists)
+        hit = deezer_search(dz, q, target_title=t.name, target_artists=t.artists, target_duration=t.duration_ms)
         if not hit:
             # Fallback: strip edition suffixes from the query, and search by the
             # lead artist only (same reasoning as the primary query above).
@@ -183,7 +183,7 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
             q_fb = f"{lead_artist} {_strip_editions(t.name)}".strip()
             if q_fb != q:
                 report(f"    [deezer] fallback search: {q_fb}")
-                hit = deezer_search(dz, q_fb, target_title=t.name, target_artists=t.artists)
+                hit = deezer_search(dz, q_fb, target_title=t.name, target_artists=t.artists, target_duration=t.duration_ms)
                 if hit:
                     matched = hit.get("title") or "?"
                     matched_artist = _dz_field(hit, "artist", "name")

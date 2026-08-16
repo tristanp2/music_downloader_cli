@@ -229,6 +229,7 @@ def parse_spotify_playlist(token, playlist_id):
                     name=tn,
                     artists=arts,
                     spotify_uri=t.get("spotify_uri"),
+                    duration_ms=t.get("duration_ms"),
                 ))
         url = page.get("next")
         if not url:

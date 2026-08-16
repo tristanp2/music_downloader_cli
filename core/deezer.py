@@ -98,7 +98,7 @@ def _has_remix(title):
 # search
 # ---------------------------------------------------------------------------
 
-def deezer_search(dz, query, target_title=None, target_artists=None):
+def deezer_search(dz, query, target_title=None, target_artists=None, target_duration=None):
     """Return the best Deezer track dict for a query, or None.
 
     Deezer's search ranks by popularity, so the top hit is often NOT the track
@@ -107,6 +107,14 @@ def deezer_search(dz, query, target_title=None, target_artists=None):
     title+artist similarity to the target and pick the best match. Results
     below 0.5 title similarity are rejected so a totally wrong popular track
     is never downloaded.
+
+    target_duration is the Spotify track length in SECONDS (or None). It is
+    used only as a tie-breaker / safety check when the candidate artist is
+    genuinely different from the wanted artist: two different artists can
+    legitimately share an identical song title, so an exact title alone is NOT
+    enough to match across artists -- the durations must also agree (within
+    tolerance), proving it's the same recording (or a Deezer artist
+    mis-attribution) rather than a same-named different song.
     """
     try:
         res = dz.api.search(query)
@@ -118,12 +126,30 @@ def deezer_search(dz, query, target_title=None, target_artists=None):
 
     want_title = target_title or ""
     want_artist = " ".join(target_artists or [])
+    # target_duration arrives in ms from Spotify; convert to seconds to match
+    # Deezer's per-track 'duration' field (also seconds).
+    want_duration = (target_duration / 1000.0) if target_duration else None
 
     # Edition-stripped "core" of the wanted title -- the thing we actually
     # match on. Deezer/Spotify disagree on which edition suffix a track
     # carries ("Original Mix" vs bare), so those are noise, not identity.
     want_core = _tokenize(_strip_editions(want_title))
     want_remix = _has_remix(want_title)
+
+    def _durations_match(track):
+        """True only if both sides have a duration and they agree within tol.
+
+        Fail-safe: if either duration is missing we CANNOT confirm a
+        same-artist-different-title case, so we return False (reject) rather
+        than blindly accept. Note: read duration directly from the dict --
+        _dz_field string-filters its return and would mangle the int.
+        """
+        if want_duration is None:
+            return False
+        cand_dur = track.get("duration") if isinstance(track, dict) else None
+        if not isinstance(cand_dur, (int, float)):
+            return False
+        return abs(cand_dur - want_duration) <= 2.0
 
     def score(track):
         t_title = _dz_field(track, "title")
@@ -155,10 +181,14 @@ def deezer_search(dz, query, target_title=None, target_artists=None):
         # papered over by a loose title match. Deezer's artist metadata is
         # noisy, so we still reward artist agreement as a bonus -- but if the
         # two artists share essentially nothing, a half-wrong title (e.g.
-        # "Basement" vs "Basement Land" by a different artist) is rejected
-        # unless the title is near-exact. This stops cross-artist false matches.
+        # "Basement" vs "Basement Land" by a different artist) is rejected.
+        # The ONLY exception: an EXACT title by a different artist is allowed
+        # ONLY if the durations also match (proving same recording, not a
+        # same-named different song). Missing/mismatched duration => reject.
         if artist_sim < 0.2:
-            return title_sim if title_sim >= 0.9 else 0.0
+            if want_core == cand_core and _durations_match(track):
+                return title_sim + 0.5
+            return 0.0
         # title contributes 0-1, artist contributes up to 0.5
         return title_sim + (0.5 if artist_sim >= 0.5 else 0)
 
