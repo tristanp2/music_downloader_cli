@@ -174,27 +174,27 @@ def run_playlist(url, dz, settings, work_dir=None, on_progress=None, on_event=No
 
         # search
         report(f"[{pos}/{total}] {display[:60]}")
-        hit = deezer_search(dz, q, target_title=t.name, target_artists=t.artists, target_duration=t.duration_ms)
-        if not hit:
+        matched_track = deezer_search(dz, q, target_title=t.name, target_artists=t.artists, target_duration=t.duration_ms)
+        if not matched_track:
             # Fallback: strip edition suffixes from the query, and search by the
             # lead artist only (same reasoning as the primary query above).
             from .deezer import _strip_editions
             lead_artist = t.artists[0] if t.artists else ""
-            q_fb = f"{lead_artist} {_strip_editions(t.name)}".strip()
-            if q_fb != q:
-                report(f"    [deezer] fallback search: {q_fb}")
-                hit = deezer_search(dz, q_fb, target_title=t.name, target_artists=t.artists, target_duration=t.duration_ms)
-                if hit:
-                    matched = hit.get("title") or "?"
-                    matched_artist = _dz_field(hit, "artist", "name")
-                    report(f"    [deezer] fallback matched: {matched_artist} - {matched}")
-        if not hit:
+            fallback_query = f"{lead_artist} {_strip_editions(t.name)}".strip()
+            if fallback_query != q:
+                report(f"    [deezer] fallback search: {fallback_query}")
+                matched_track = deezer_search(dz, fallback_query, target_title=t.name, target_artists=t.artists, target_duration=t.duration_ms)
+                if matched_track:
+                    matched_title = matched_track.get("title") or "?"
+                    matched_artist = _dz_field(matched_track, "artist", "name")
+                    report(f"    [deezer] fallback matched: {matched_artist} - {matched_title}")
+        if not matched_track:
             report("    [deezer] no match")
             event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.MISSED, "pct": 0})
             missed.append({"name": t.name, "artists": t.artists})
             statuses.append("missed")
             continue
-        dz_url = hit.get("link")
+        dz_url = matched_track.get("link")
         if not dz_url:
             missed.append({"name": t.name, "artists": t.artists})
             event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.MISSED, "pct": 0})

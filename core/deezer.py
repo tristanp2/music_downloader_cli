@@ -124,17 +124,17 @@ def deezer_search(dz, query, target_title=None, target_artists=None, target_dura
     if not data:
         return None
 
-    want_title = target_title or ""
-    want_artist = " ".join(target_artists or [])
+    target_title = target_title or ""
+    target_artist = " ".join(target_artists or [])
     # target_duration arrives in ms from Spotify; convert to seconds to match
     # Deezer's per-track 'duration' field (also seconds).
-    want_duration = (target_duration / 1000.0) if target_duration else None
+    target_duration_sec = (target_duration / 1000.0) if target_duration else None
 
-    # Edition-stripped "core" of the wanted title -- the thing we actually
+    # Edition-stripped "core" of the target title -- the thing we actually
     # match on. Deezer/Spotify disagree on which edition suffix a track
     # carries ("Original Mix" vs bare), so those are noise, not identity.
-    want_core = _tokenize(_strip_editions(want_title))
-    want_remix = _has_remix(want_title)
+    target_title_core = _tokenize(_strip_editions(target_title))
+    target_is_remix = _has_remix(target_title)
 
     def _durations_match(track):
         """True only if both sides have a duration and they agree within tol.
@@ -144,39 +144,39 @@ def deezer_search(dz, query, target_title=None, target_artists=None, target_dura
         than blindly accept. Note: read duration directly from the dict --
         _dz_field string-filters its return and would mangle the int.
         """
-        if want_duration is None:
+        if target_duration_sec is None:
             return False
-        cand_dur = track.get("duration") if isinstance(track, dict) else None
-        if not isinstance(cand_dur, (int, float)):
+        candidate_duration = track.get("duration") if isinstance(track, dict) else None
+        if not isinstance(candidate_duration, (int, float)):
             return False
-        return abs(cand_dur - want_duration) <= 2.0
+        return abs(candidate_duration - target_duration_sec) <= 2.0
 
     def score(track):
-        t_title = _dz_field(track, "title")
-        t_artist = _dz_field(track, "artist", "name")
-        cand_core = _tokenize(_strip_editions(t_title))
+        candidate_title = _dz_field(track, "title")
+        candidate_artist = _dz_field(track, "artist", "name")
+        candidate_title_core = _tokenize(_strip_editions(candidate_title))
         # Deezer sometimes includes the artist name in the title itself
         # (e.g. 'Volen Sentir - Arrival'). Remove those tokens so the title
         # core reflects only the actual track name, not artist noise.
-        t_artist_tokens = _tokenize(t_artist)
-        cand_core = cand_core - t_artist_tokens
-        if not want_core or not cand_core:
+        candidate_artist_tokens = _tokenize(candidate_artist)
+        candidate_title_core = candidate_title_core - candidate_artist_tokens
+        if not target_title_core or not candidate_title_core:
             return 0.0
-        # A remix is a distinct recording: if the wanted track and this
+        # A remix is a distinct recording: if the target track and this
         # candidate disagree on remix vs not, never match.
-        if want_remix != _has_remix(t_title):
+        if target_is_remix != _has_remix(candidate_title):
             return 0.0
         # Exact core match (after stripping editions) is the strong signal.
-        if want_core == cand_core:
-            title_sim = 1.0
+        if target_title_core == candidate_title_core:
+            title_similarity = 1.0
         else:
             # Fall back to Jaccard on the raw titles for non-edition
             # differences (e.g. "feat. X", "Setpoint 85" vs "70"). The
             # remix check above already ruled out remix mismatches.
-            title_sim = _title_similarity(want_title, t_title)
-            if title_sim < 0.5:
+            title_similarity = _title_similarity(target_title, candidate_title)
+            if title_similarity < 0.5:
                 return 0.0
-        artist_sim = _title_similarity(want_artist, t_artist) if want_artist and t_artist else 0
+        artist_similarity = _title_similarity(target_artist, candidate_artist) if target_artist and candidate_artist else 0
         # A genuinely different artist (near-zero token overlap) must NOT be
         # papered over by a loose title match. Deezer's artist metadata is
         # noisy, so we still reward artist agreement as a bonus -- but if the
@@ -185,12 +185,12 @@ def deezer_search(dz, query, target_title=None, target_artists=None, target_dura
         # The ONLY exception: an EXACT title by a different artist is allowed
         # ONLY if the durations also match (proving same recording, not a
         # same-named different song). Missing/mismatched duration => reject.
-        if artist_sim < 0.2:
-            if want_core == cand_core and _durations_match(track):
-                return title_sim + 0.5
+        if artist_similarity < 0.2:
+            if target_title_core == candidate_title_core and _durations_match(track):
+                return title_similarity + 0.5
             return 0.0
         # title contributes 0-1, artist contributes up to 0.5
-        return title_sim + (0.5 if artist_sim >= 0.5 else 0)
+        return title_similarity + (0.5 if artist_similarity >= 0.5 else 0)
 
     best = None
     best_score = 0
