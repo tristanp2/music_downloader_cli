@@ -42,6 +42,7 @@ from pathlib import Path
 from collections import defaultdict
 from collections.abc import AsyncGenerator, Iterator
 from dataclasses import asdict
+from dataclasses import is_dataclass
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
@@ -50,7 +51,7 @@ from fastapi.staticfiles import StaticFiles
 from core.config import resolve_output_dir, ARL, read_conf, read_users, CONF_SETTINGS
 from core.deezer import init_deezer
 from deezer import Deezer
-from core.downloader import run_playlist
+from core.downloader import run_playlist, DispatchResult
 from core.spotify import validate_spotify_url, get_spotify_token, parse_spotify_playlist
 from core.registry import list_playlists
 from core.library import find_existing_track
@@ -76,6 +77,10 @@ async def lifespan(app):
     global DZ, EVENT_LOOP
     EVENT_LOOP = asyncio.get_running_loop()
     attach_uvicorn_loggers()
+    if server_lock.another_server_running():
+        log.error("[startup] another music-downloader server is already running "
+                  "(REPO/.server.lock points at a live PID) -- refusing to start")
+        return
     if not ARL.is_file():
         log.info("[startup] config/.arl missing -- /download will 503 until added")
     else:
@@ -214,15 +219,18 @@ def _job_public(job: Job) -> dict:
 
 
 def _jsonable(v: object) -> object:
-    """Recursively coerce non-JSON types (notably pathlib.Path / WindowsPath)
-    to str. Guarantees nothing in a serialized payload can raise
-    'Object of type WindowsPath is not JSON serializable' en route to the frontend."""
+    """Recursively coerce non-JSON types (notably pathlib.Path / WindowsPath
+    and dataclasses like DispatchResult) to JSON-friendly shapes. Guarantees
+    nothing in a serialized payload can raise 'Object of type ... is not JSON
+    serializable' en route to the frontend."""
     if isinstance(v, Path):
         return str(v)
     if isinstance(v, dict):
         return {k: _jsonable(val) for k, val in v.items()}
     if isinstance(v, (list, tuple)):
         return [_jsonable(x) for x in v]
+    if is_dataclass(v) and not isinstance(v, type):
+        return _jsonable(asdict(v))
     return v
 
 
@@ -346,10 +354,11 @@ def _run_job(job_id: str, url: str, user: str) -> None:
                 log.error("run_playlist raised: %s", e)
                 for line in tb.strip().split("\n"):
                     log.error("  %s", line)
-                result = {"ok": False, "error": f"run_playlist raised: {e}", "traceback": tb}
+                result = DispatchResult(ok=False, error=f"run_playlist raised: {e}",
+                                        missed_tracks=[tb])
     job.result = result
-    job.status = DownloadStatus.OK if result.get("ok") else DownloadStatus.ERROR
-    job.name = str(result.get("name") or "")
+    job.status = DownloadStatus.OK if result.ok else DownloadStatus.ERROR
+    job.name = str(result.name or "")
     job.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     # Signal SSE subscribers that the job is finished.
     # Convert Path to str so the event is JSON-serializable.

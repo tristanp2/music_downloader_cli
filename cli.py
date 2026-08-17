@@ -67,19 +67,19 @@ def main():
             break
 
         result = server_lock.cli_dispatch(url, dz=dz, settings=settings, work_dir=WORK_DIR, user=user)
-        if not result.get("ok"):
-            # server mode returns an error dict (e.g. job POST failed) without a
-            # [skip] tag; local mode returns run_playlist's error dict too.
-            print(f"[skip] {result.get('error', 'unknown error')}")
+        if not result.ok:
+            # server mode returns an error DispatchResult (e.g. job POST failed);
+            # local mode returns run_playlist's error DispatchResult too.
+            print(f"[skip] {result.error or 'unknown error'}")
             continue
-        if result.get("routed") == "server":
+        if result.routed == "server":
             # server accepted the job; real progress lives in the web UI
             # (GET /jobs/{job_id}). The CLI just confirms dispatch.
-            print(f"  [server:{result.get('port')}] job {result.get('job_id')} queued "
+            print(f"  [server:{result.port}] job {result.job_id} queued "
                   f"-- watch progress in the web UI")
         else:
-            print(f"  downloaded={result['downloaded']}  skipped={result['skipped']}  "
-                  f"missed={result['missed']}  failed={result['failed']}")
+            print(f"  downloaded={result.downloaded}  skipped={result.skipped}  "
+                  f"missed={result.missed}  failed={result.failed}")
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ class Job:
     name: str = ""                          # playlist/album name (from run_playlist result)
     status: str = "running"                 # running|done|error
     log: list[str] = field(default_factory=list)
-    result: Optional[dict] = None           # run_playlist() result dict
+    result: Optional["DispatchResult"] = None  # run_playlist() result (dataclass)
     started_at: str = ""
     finished_at: Optional[str] = None
     progress: JobProgress = field(default_factory=JobProgress)

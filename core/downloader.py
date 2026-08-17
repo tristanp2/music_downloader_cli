@@ -5,17 +5,9 @@ This is the importable workhorse used by cli.py, sync.py, and app.py.
     from core.downloader import run_playlist
     result = run_playlist(url, dz, settings, work_dir)
 
-Returns a dict:
-    {
-        "ok": bool,
-        "name": str,            # playlist/album name
-        "folder": Path,         # output folder
-        "downloaded": int,      # new FLACs written
-        "skipped": int,         # already present
-        "missed": int,          # no Deezer match
-        "failed": int,          # download failed after match
-        "missed_tracks": [...], # list of {name, artists} for reporting
-    }
+Returns a DispatchResult (dataclass) carrying ok/name/folder/downloaded/skipped/
+missed/failed/missed_tracks. cli_dispatch adds the dispatch fields (routed/port/
+job_id); see DispatchResult.
 """
 from __future__ import annotations
 
@@ -23,6 +15,7 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 import time
+from dataclasses import dataclass, field
 
 from .config import resolve_output_dir, read_conf
 from .spotify import safe_folder_name, validate_spotify_url, get_spotify_token, parse_spotify_playlist
@@ -35,7 +28,29 @@ from .event_types import JobEventType, DownloadStatus
 log = logging.getLogger("music_downloader")
 
 
-def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None = None, on_progress: Callable[[str], None] | None = None, on_event: Callable[[dict], None] | None = None) -> dict[str, object]:
+@dataclass
+class DispatchResult:
+    """Typed envelope for one download dispatch (local run or server POST).
+
+    Replaces the previous free-form dict so a missing field -- e.g. `ok` on the
+    server-success path -- fails at construction instead of silently reporting a
+    successful dispatch as a failure in the CLI.
+    """
+    ok: bool = False
+    routed: str = ""            # "local" | "server"
+    port: int | None = None
+    job_id: str | None = None
+    name: str = ""
+    folder: Path | None = None
+    downloaded: int = 0
+    skipped: int = 0
+    missed: int = 0
+    failed: int = 0
+    missed_tracks: list = field(default_factory=list)
+    error: str = ""
+
+
+def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None = None, on_progress: Callable[[str], None] | None = None, on_event: Callable[[dict], None] | None = None) -> "DispatchResult":
     """Download one Spotify playlist/album/track. Returns a result dict.
 
     Parameters
@@ -58,7 +73,6 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
         - {"type": "pct", "pct": 0-100}
         - {"type": "done", "pos": N, "status": "downloaded"|"skipped"|"missed"|"failed", "pct": 0|100}
     """
-    out = {}
     def report(msg: str) -> None:
         if msg:
             log.info(msg)
@@ -77,8 +91,7 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
     if not pid:
         msg = "[!] Not a valid open.spotify.com playlist/album/track URL."
         report(msg)
-        out.update(ok=False, error=msg)
-        return out
+        return DispatchResult(ok=False, error=msg)
 
     try:
         token = get_spotify_token()
@@ -87,8 +100,7 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
     except Exception as e:
         msg = f"[!] Spotify auth failed: {e}"
         report(msg)
-        out.update(ok=False, error=msg)
-        return out
+        return DispatchResult(ok=False, error=msg)
 
     try:
         parsed = parse_spotify_playlist(token, pid)
@@ -97,14 +109,12 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
     except Exception as e:
         msg = f"[!] Playlist parse failed: {e}"
         report(msg)
-        out.update(ok=False, error=msg)
-        return out
+        return DispatchResult(ok=False, error=msg)
 
     if not tracks:
         msg = f"[!] No tracks found in playlist '{pl_name}' (id={pid}) -- the playlist may be empty or inaccessible"
         report(msg)
-        out.update(ok=False, error=msg)
-        return out
+        return DispatchResult(ok=False, error=msg)
 
     total = len(tracks)
     folder = safe_folder_name(pl_name) or pid
@@ -234,13 +244,13 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
             report("   - " + " ".join(mt["artists"]) + " " + mt["name"])
     report("")
 
-    return {
-        "ok": True,
-        "name": pl_name,
-        "folder": out_dir,
-        "downloaded": downloaded,
-        "skipped": skipped,
-        "missed": len(missed),
-        "failed": failed,
-        "missed_tracks": missed,
-    }
+    return DispatchResult(
+        ok=True,
+        name=pl_name,
+        folder=out_dir,
+        downloaded=downloaded,
+        skipped=skipped,
+        missed=len(missed),
+        failed=failed,
+        missed_tracks=missed,
+    )

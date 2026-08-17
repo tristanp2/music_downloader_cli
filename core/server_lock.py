@@ -13,9 +13,9 @@ Design
   only runs when the server is DOWN -- so the two never hold a Deezer session
   simultaneously (which would invalidate one of them on a shared ARL).
 
-The PID check is a real liveness probe (os.kill(pid, 0)), not just "does the
-file exist", so a crashed server leaves a stale lock that the CLI correctly
-ignores and falls back to local mode.
+The PID check uses psutil.pid_exists() (a real, cross-platform liveness probe),
+not just "does the file exist", so a crashed server leaves a stale lock that the
+CLI correctly ignores and falls back to local mode.
 """
 from __future__ import annotations
 
@@ -30,6 +30,17 @@ from .config import REPO, read_conf
 from deezer import Deezer
 
 LOCK_PATH = REPO / ".server.lock"
+
+
+def _bind_host() -> str:
+    """Host the server listens on (config bind_host), matching app.py's bind.
+
+    If the server binds all interfaces (0.0.0.0) we use loopback; if it binds a
+    specific LAN IP we use that IP -- never localhost, which wouldn't connect to
+    a non-loopback bind.
+    """
+    host = (read_conf(REPO / "config" / "settings.conf").get("bind_host") or "0.0.0.0").strip()
+    return "127.0.0.1" if host in ("0.0.0.0", "") else host
 
 def write_lock(port: int) -> None:
     """Create / refresh the lockfile with our PID + port.
@@ -59,8 +70,9 @@ def clear_lock() -> None:
     """Remove the lockfile. PID-agnostic: on Windows SIGTERM is a hard kill that
     never runs shutdown/atexit, so gating on our own PID would leave the lock
     orphaned. Whoever is shutting down owns the lock at that moment, so just
-    delete it if present. The PID-liveness check in read_lock() is what makes a
-    stale lock from a crash harmless (it's ignored and reaped on next start).
+    delete it if present. The PID-liveness check in read_lock()/another_server_running()
+    is what makes a stale lock from a crash harmless (it's ignored and reaped on
+    next start).
     """
     try:
         if LOCK_PATH.is_file():
@@ -115,42 +127,43 @@ def _server_token() -> str | None:
     return cfg.get("server_token") or None
 
 
-def cli_dispatch(url: str, dz: "Deezer | None" = None, settings: dict | None = None, work_dir: Path | None = None, user: str | None = None) -> dict:
+def cli_dispatch(url: str, dz: "Deezer | None" = None, settings: dict | None = None, work_dir: Path | None = None, user: str | None = None) -> "DispatchResult":
     """Route a download request: POST to the running server if up, else run
     locally via the core lib.
 
-    Returns the result dict from run_playlist (local) or the server's JSON
-    (which carries a `job_id`). Both are tagged with `routed` = "server" or
-    "local" and, for server mode, `port`, so the CLI can tell the user which
-    path it took. Raises nothing for the local path's auth/parse errors --
-    those are already handled inside run_playlist, which returns an error dict.
+    Returns a DispatchResult tagged with `routed` = "server" or "local" (and
+    `port`/`job_id` in server mode) so the CLI can tell the user which path it
+    took. Raises nothing for the local path's auth/parse errors -- those are
+    already handled inside run_playlist, which returns an error DispatchResult.
     """
+    from dataclasses import replace
+    from .downloader import DispatchResult
+
     port = server_is_up()
     if port is not None:
         r = _post_to_server(port, url, user=user)
-        r["routed"] = "server"
-        r["port"] = port
-        return r
+        return replace(r, routed="server", port=port)
     # local fallback
     if dz is None or settings is None:
         raise RuntimeError("cli_dispatch local mode requires dz + settings")
     from .downloader import run_playlist
     r = run_playlist(url, dz, settings, work_dir=work_dir)
-    r["routed"] = "local"
-    return r
+    return replace(r, routed="local")
 
 
-def _post_to_server(port: int, url: str, user: str | None = None) -> dict:
-    """POST {url} to the running server's /download endpoint. Returns the
-    server's JSON result dict. Network errors surface as an error dict so the
-    CLI can still report cleanly."""
+def _post_to_server(port: int, url: str, user: str | None = None) -> "DispatchResult":
+    """POST {url} to the running server's /download endpoint. Returns a
+    DispatchResult -- success carries job_id (the server now sets ok=True),
+    network/HTTP errors surface as an error DispatchResult so the CLI still
+    reports cleanly."""
     import urllib.request
     import urllib.error
+    from .downloader import DispatchResult
 
     token = _server_token()
     body = json.dumps({"url": url}).encode("utf-8")
     qs = urlencode({"user": user}) if user else ""
-    req_url = f"http://localhost:{port}/download?{qs}"
+    req_url = f"http://{_bind_host()}:{port}/download?{qs}"
     req = urllib.request.Request(
         req_url,
         data=body,
@@ -161,9 +174,14 @@ def _post_to_server(port: int, url: str, user: str | None = None) -> dict:
         req.add_header("X-Auth-Token", token)
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
-            return json.loads(r.read().decode("utf-8"))
+            data = json.loads(r.read().decode("utf-8"))
+            # The server returns {"job_id": ...} on success; normalize so the
+            # single ok flag is always present (this was the missing-ok bug).
+            if "ok" not in data:
+                data["ok"] = True
+            return DispatchResult(**data)
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:300]
-        return {"ok": False, "error": f"server returned HTTP {e.code}: {detail}"}
+        return DispatchResult(ok=False, error=f"server returned HTTP {e.code}: {detail}")
     except Exception as e:
-        return {"ok": False, "error": f"could not reach server on port {port}: {e}"}
+        return DispatchResult(ok=False, error=f"could not reach server on port {port}: {e}")
