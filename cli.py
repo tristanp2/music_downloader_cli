@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-spotify_to_flac.py  --  thin CLI entrypoint for the core pipeline.
+cli.py  --  thin CLI entrypoint for the core pipeline.
 
-All logic lives in core/ so app.py (FastAPI) and sync.py (cron) can call the
-same code. This file only:
-  1. Boots the Deezer session + deemix settings.
+All logic lives in core/ so app.py (FastAPI) and the CLI can call the same
+code. The web server also exposes POST /sync for scheduled re-downloads. This
+file only:
+  1. Boots the Deezer session + deemix settings (ARL lives at config/.arl).
   2. Loops: prompt for a Spotify URL, call core.run_playlist(), print result.
 """
 import sys
@@ -16,7 +17,7 @@ REPO = Path(__file__).resolve().parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from core.config import resolve_output_dir, sync_deezer_arl, ARL, die, read_users
+from core.config import resolve_output_dir, ARL, die, read_users
 from core.deezer import init_deezer
 from core.downloader import run_playlist
 from core import server_lock
@@ -31,10 +32,9 @@ def main():
     user = args.user if args.user else users[0]
 
     if not ARL.is_file():
-        die("deezer.arl missing (Deezer HiFi session token).")
+        die("config/.arl missing (Deezer HiFi session token).")
 
     arl_text = ARL.read_text(encoding="utf-8").strip()
-    sync_deezer_arl()  # single source of truth -> config/.arl for deemix
     WORK_DIR = resolve_output_dir() / user
     WORK_DIR.mkdir(parents=True, exist_ok=True)
 
