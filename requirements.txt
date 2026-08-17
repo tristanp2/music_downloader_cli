@@ -8,3 +8,4 @@ rich
 # webserver (app.py)
 fastapi
 uvicorn
+psutil

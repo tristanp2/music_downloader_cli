@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import psutil
 import sys
 from urllib.parse import urlencode
 from pathlib import Path
@@ -29,23 +30,6 @@ from .config import REPO, read_conf
 from deezer import Deezer
 
 LOCK_PATH = REPO / ".server.lock"
-
-
-def _pid_alive(pid: int) -> bool:
-    """Return True if a process with this PID currently exists (cross-platform)."""
-    if os.name == "nt":
-        # On Windows, OpenProcess + a no-op signal check. os.kill(pid, 0) works.
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            return False
-        return True
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
-
 
 def write_lock(port: int) -> None:
     """Create / refresh the lockfile with our PID + port.
@@ -60,7 +44,7 @@ def write_lock(port: int) -> None:
             try:
                 data = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
                 stale_pid = data.get("pid")
-                if stale_pid is not None and not _pid_alive(stale_pid):
+                if stale_pid is not None and not psutil.pid_exists(stale_pid):
                     LOCK_PATH.unlink()
             except Exception:
                 # unreadable lock -> treat as stale and replace
@@ -99,7 +83,7 @@ def read_lock() -> tuple[int, int] | None:
         port = data.get("port")
         if pid is None or port is None:
             return None
-        if not _pid_alive(pid):
+        if not psutil.pid_exists(pid):
             return None
         return (pid, port)
     except Exception:
