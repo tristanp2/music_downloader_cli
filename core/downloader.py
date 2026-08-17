@@ -24,7 +24,7 @@ from collections.abc import Callable
 from pathlib import Path
 import time
 
-from .config import resolve_output_dir, sync_deezer_arl, read_conf
+from .config import resolve_output_dir, read_conf
 from .spotify import safe_folder_name, validate_spotify_url, get_spotify_token, parse_spotify_playlist
 from .deezer import deezer_search, deemix_download, _dz_field
 from deezer import Deezer

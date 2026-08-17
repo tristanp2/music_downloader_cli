@@ -1,0 +1,15 @@
+{
+  "root": true,
+  "env": {
+    "browser": true,
+    "es2022": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2022,
+    "sourceType": "script"
+  },
+  "rules": {
+    "brace-style": ["error", "allman"],
+    "indent": ["error", 2, { "SwitchCase": 1 }]
+  }
+}

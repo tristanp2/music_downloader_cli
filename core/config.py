@@ -17,9 +17,8 @@ CORE = Path(__file__).resolve().parent
 REPO = CORE.parent
 DEFAULT_WORK_DIR = Path.home() / "Music" / "music_downloader_outputs"
 CONF_SETTINGS = REPO / "config" / "settings.conf"
-ARL = REPO / "deezer.arl"
-DEEMIX_ARL = REPO / "config" / ".arl"
-SPOTIFY_TOKEN_CACHE = REPO / "spotify_token.json"
+ARL = REPO / "config" / ".arl"
+SPOTIFY_TOKEN_CACHE = REPO / "config" / "spotify_token.json"
 SPOTIFY_REDIRECT = "http://127.0.0.1:48721/callback"
 
 
@@ -54,24 +53,12 @@ def resolve_output_dir() -> Path:
         return Path(os.path.expanduser(cfg["output_dir"])).resolve()
     return DEFAULT_WORK_DIR.resolve()
 
-
 def read_users() -> list[str]:
     """Read allowed users from config/settings.conf. Returns list of usernames.
-    Falls back to ['tristan'] if the key is missing."""
+    Falls back to ['tristan'] if the key is missing.
+    """
     cfg = read_conf(CONF_SETTINGS)
     raw = cfg.get("users", "")
     if not raw.strip():
         return ["tristan"]
     return [u.strip() for u in raw.split(",") if u.strip()]
-
-
-def sync_deezer_arl() -> None:
-    """Make deezer.arl the single source of truth: copy it into config/.arl
-    (deemix portable mode reads that). Keeps you from editing two files."""
-    if not ARL.is_file():
-        return
-    try:
-        DEEMIX_ARL.parent.mkdir(parents=True, exist_ok=True)
-        DEEMIX_ARL.write_text(ARL.read_text(encoding="utf-8"), encoding="utf-8")
-    except Exception:
-        pass  # deemix will just use whatever is there

@@ -369,5 +369,5 @@ def init_deezer(arl_text: str) -> "Deezer":
     """Create + log in a Deezer session via ARL. Returns the session or dies."""
     dz = Deezer()
     if not dz.login_via_arl(arl_text):
-        raise RuntimeError("Deezer ARL login failed (token in deezer.arl may be expired).")
+        raise RuntimeError("Deezer ARL login failed (token in config/.arl may be expired).")
     return dz

@@ -16,4 +16,4 @@ if not exist "%VENV_PY%" (
     exit /b 1
 )
 
-"%VENV_PY%" "%DIR%spotify_to_flac.py" %*
+"%VENV_PY%" "%DIR%cli.py" %*

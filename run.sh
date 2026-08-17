@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run.sh - launch the music-downloader CLI (spotify_to_flac.py).
+# run.sh - launch the music-downloader CLI (cli.py).
 # Portable across Linux, WSL2, and Windows git-bash. Resolves its own dir and
 # the project venv (bin/python on Linux/WSL2, Scripts/python.exe on Windows
 # git-bash). No cygpath: MSYS auto-translates /c/... for the .exe on Windows.
@@ -18,4 +18,4 @@ if [ ! -x "$VENV_PY" ]; then
     echo "  pip install -r requirements.txt"
     exit 1
 fi
-exec "$VENV_PY" "$DIR/spotify_to_flac.py" "$@"
+exec "$VENV_PY" "$DIR/cli.py" "$@"

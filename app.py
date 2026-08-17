@@ -47,7 +47,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from core.config import resolve_output_dir, sync_deezer_arl, ARL, read_conf, read_users, CONF_SETTINGS
+from core.config import resolve_output_dir, ARL, read_conf, read_users, CONF_SETTINGS
 from core.deezer import init_deezer
 from deezer import Deezer
 from core.downloader import run_playlist
@@ -77,10 +77,9 @@ async def lifespan(app):
     EVENT_LOOP = asyncio.get_running_loop()
     attach_uvicorn_loggers()
     if not ARL.is_file():
-        log.info("[startup] deezer.arl missing -- /download will 503 until added")
+        log.info("[startup] config/.arl missing -- /download will 503 until added")
     else:
         arl_text = ARL.read_text(encoding="utf-8").strip()
-        sync_deezer_arl()
         try:
             DZ = init_deezer(arl_text)
             log.info("[startup] Deezer session established")
@@ -149,7 +148,7 @@ def _resolve_user_path(user: str, folder: str) -> Path:
         raise HTTPException(status_code=403, detail="invalid path")
     return fp
 
-DZ: "Deezer | None" = None          # the one Deezer session, set in startup()
+DZ: Deezer | None = None          # the one Deezer session, set in startup()
 DZ_LOCK = threading.Lock()   # serialize Deezer calls (session not thread-safe)
 JOBS: dict[str, Job] = {}          # job_id -> Job
 JOBS_LOCK = threading.Lock()
@@ -387,6 +386,10 @@ def index() -> HTMLResponse:
     if html.is_file():
         return HTMLResponse(html.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>music-downloader</h1><p>templates/index.html not found.</p>")
+
+
+# Serve the split-out frontend JS (templates/index.html references /static/app.js).
+app.mount("/static", StaticFiles(directory=str(REPO / "static")), name="static")
 
 
 def _start_job(url: str, user: str, name: str = "") -> str | None:
@@ -794,9 +797,8 @@ def reload(request: Request, payload: dict | None = None):
     _authenticate(request)
     global DZ
     if not ARL.is_file():
-        raise HTTPException(status_code=503, detail="deezer.arl missing")
+        raise HTTPException(status_code=503, detail="config/.arl missing")
     arl_text = ARL.read_text(encoding="utf-8").strip()
-    sync_deezer_arl()
     try:
         DZ = init_deezer(arl_text)
     except Exception as e:
