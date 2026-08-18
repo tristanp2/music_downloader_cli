@@ -338,7 +338,7 @@ def _run_job(job_id: str, url: str, user: str) -> None:
                     tracks[pos].pct = e["pct"]
         dz_local = DZ
         if dz_local is None:
-            result = {"ok": False, "error": "Deezer session not ready"}
+            result = DispatchResult(ok=False, error="Deezer session not ready")
         else:
             # The download actually begins here (after waiting its turn behind
             # DZ_LOCK). Stamp the true start time and broadcast it so the

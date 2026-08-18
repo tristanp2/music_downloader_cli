@@ -75,7 +75,7 @@ def main():
         if result.routed == "server":
             # server accepted the job; real progress lives in the web UI
             # (GET /jobs/{job_id}). The CLI just confirms dispatch.
-            print(f"  [server:{result.port}] job {result.job_id} queued "
+            print(f"  server job {result.job_id} queued "
                   f"-- watch progress in the web UI")
         else:
             print(f"  downloaded={result.downloaded}  skipped={result.skipped}  "

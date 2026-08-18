@@ -38,15 +38,12 @@ class DispatchResult:
     """
     ok: bool = False
     routed: str = ""            # "local" | "server"
-    port: int | None = None
     job_id: str | None = None
     name: str = ""
-    folder: Path | None = None
     downloaded: int = 0
     skipped: int = 0
     missed: int = 0
     failed: int = 0
-    missed_tracks: list = field(default_factory=list)
     error: str = ""
 
 
@@ -247,10 +244,8 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
     return DispatchResult(
         ok=True,
         name=pl_name,
-        folder=out_dir,
         downloaded=downloaded,
         skipped=skipped,
         missed=len(missed),
         failed=failed,
-        missed_tracks=missed,
     )

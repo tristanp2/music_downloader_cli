@@ -13,6 +13,7 @@ hand the exact same structure back after an SSE reconnect.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from core.downloader import DispatchResult
 from typing import Optional
 
 
@@ -38,7 +39,7 @@ class Job:
     name: str = ""                          # playlist/album name (from run_playlist result)
     status: str = "running"                 # running|done|error
     log: list[str] = field(default_factory=list)
-    result: Optional["DispatchResult"] = None  # run_playlist() result (dataclass)
+    result: DispatchResult = field(default_factory=DispatchResult) 
     started_at: str = ""
     finished_at: Optional[str] = None
     progress: JobProgress = field(default_factory=JobProgress)
