@@ -58,7 +58,7 @@ from core.library import find_existing_track
 from core import server_lock
 from core import log
 from core import attach_uvicorn_loggers
-from core.job import Job, JobProgress, TrackState
+from core.job import DownloadJob, JobProgress, TrackState
 from core.event_types import JobEventType, DownloadStatus
 
 
@@ -154,8 +154,7 @@ def _resolve_user_path(user: str, folder: str) -> Path:
     return fp
 
 DZ: Deezer | None = None          # the one Deezer session, set in startup()
-DZ_LOCK = threading.Lock()   # serialize Deezer calls (session not thread-safe)
-JOBS: dict[str, Job] = {}          # job_id -> Job
+JOBS: dict[str, DownloadJob] = {}          # job_id -> Job
 JOBS_LOCK = threading.Lock()
 
 # SSE event subscribers: job_id -> list[asyncio.Queue]
@@ -202,10 +201,10 @@ JOB_FEED_SUBS: list[asyncio.Queue] = []
 JOB_FEED_LOCK = threading.Lock()
 
 
-def _job_public(job: Job) -> dict:
-    """JSON-friendly snapshot of a Job for the shared feed."""
+def _job_public(job: DownloadJob) -> dict:
+    """JSON-friendly snapshot of a DownloadJob for the shared feed."""
     return {
-        "id": job.id, "url": job.url, "user": job.user, "name": job.name,
+        "id": job.id, "url": job.url, "user": job.user, "playlist_name": job.playlist_name,
         "status": job.status,
         "started_at": job.started_at, "finished_at": job.finished_at,
         # Include progress so a finished job's track rows survive the 10s poll
@@ -299,74 +298,111 @@ def _deezer_session_ok() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# job runner
+# job runner -- SEQUENTIAL drain
 # ---------------------------------------------------------------------------
+# One worker thread owns the Deezer session exclusively and runs jobs FIFO from
+# JOB_QUEUE, so only one download is ever in flight at a time (the session is
+# not thread-safe, so serializing the whole job -- not just the fetch -- is the
+# simplest correct design and also makes the job status honest: queued -> running
+# -> done/error). DZ_LOCK is gone; nothing else touches DZ.
+
+from collections import deque
+JOB_QUEUE: deque[str] = deque()
+JOB_QUEUE_LOCK = threading.Lock()
+_drain_thread: threading.Thread | None = None
+
+
+def _ensure_drain_thread() -> None:
+    """Start the single sequential worker thread if it isn't already running."""
+    global _drain_thread
+    with JOB_QUEUE_LOCK:
+        if _drain_thread is None or not _drain_thread.is_alive():
+            _drain_thread = threading.Thread(target=_process_job_queue, daemon=True)
+            _drain_thread.start()
+
+
+def _process_job_queue() -> None:
+    """Pop job_ids FIFO and run each to completion before starting the next."""
+    global DZ
+    while True:
+        with JOB_QUEUE_LOCK:
+            if not JOB_QUEUE:
+                _drain_thread = None
+                return
+            job_id = JOB_QUEUE.popleft()
+        url, user = JOBS[job_id].url, JOBS[job_id].user
+        _run_job(job_id, url, user)
+
 
 def _run_job(job_id: str, url: str, user: str) -> None:
-    """Background thread: run the playlist and stream progress into the job."""
+    """Run one playlist to completion, streaming progress into the job.
+
+    Called only from the drain thread, which holds exclusive use of the Deezer
+    session -- so no lock is needed around run_playlist.
+    """
     global DZ
     job = JOBS[job_id]
     lines = job.log
     tracks = job.progress.tracks
     work_dir = WORK_DIR_BASE / user
     work_dir.mkdir(parents=True, exist_ok=True)
-    with DZ_LOCK:
-        def on_progress(msg: str) -> None:
-            lines.append(msg)
-        def on_event(e: dict) -> None:
-            _push_event(job_id, e)
-            t = e.get("type")
-            if t == JobEventType.TRACKS:
-                job.progress.total = e["total"]
-                for item in e["items"]:
-                    tracks[item["pos"]] = TrackState(
-                        pos=item["pos"], name=item["name"],
-                        status=DownloadStatus.PENDING, pct=0,
-                    )
-            elif t == JobEventType.START:
-                if e["pos"] in tracks:
-                    tracks[e["pos"]].status = DownloadStatus.DOWNLOADING
-            elif t == JobEventType.PCT:
-                for p in sorted(tracks.keys(), reverse=True):
-                    if tracks[p].status == DownloadStatus.DOWNLOADING:
-                        tracks[p].pct = e["pct"]
-                        break
-            elif t == JobEventType.DONE:
-                pos = e["pos"]
-                if pos in tracks:
-                    tracks[pos].status = e["status"]
-                    tracks[pos].pct = e["pct"]
-        dz_local = DZ
-        if dz_local is None:
-            result = DispatchResult(ok=False, error="Deezer session not ready")
-        else:
-            # The download actually begins here (after waiting its turn behind
-            # DZ_LOCK). Stamp the true start time and broadcast it so the
-            # frontend shows this, not the enqueue/sync time.
+
+    def on_progress(msg: str) -> None:
+        lines.append(msg)
+
+    def on_event(e: dict) -> None:
+        _push_event(job_id, e)
+        t = e.get("type")
+        if t == JobEventType.TRACKS:
+            job.progress.total = e["total"]
+            for item in e["items"]:
+                tracks[item["pos"]] = TrackState(
+                    pos=item["pos"], name=item["name"],
+                    status=DownloadStatus.PENDING, pct=0,
+                )
+        elif t == JobEventType.START:
+            if e["pos"] in tracks:
+                tracks[e["pos"]].status = DownloadStatus.DOWNLOADING
+        elif t == JobEventType.PCT:
+            for p in sorted(tracks.keys(), reverse=True):
+                if tracks[p].status == DownloadStatus.DOWNLOADING:
+                    tracks[p].pct = e["pct"]
+                    break
+        elif t == JobEventType.DONE:
+            pos = e["pos"]
+            if pos in tracks:
+                tracks[pos].status = e["status"]
+                tracks[pos].pct = e["pct"]
+
+    dz_local = DZ
+    if dz_local is None:
+        result = DispatchResult(ok=False, error="Deezer session not ready")
+    else:
+        # The download actually begins here. Stamp the true start time and
+        # broadcast it so the frontend shows this, not the enqueue/sync time.
+        # Status only flips to "running" NOW -- not at enqueue -- so queued jobs
+        # honestly sit at "queued" until the one ahead of them finishes.
+        with JOBS_LOCK:
+            job.status = "running"
             job.started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-            _push_event(job_id, {"type": JobEventType.JOB_STARTED, "started_at": job.started_at})
-            _push_job_feed({"type": JobEventType.JOB_STARTED, "job": _job_public(job)})
-            try:
-                result = run_playlist(url, dz_local, SETTINGS, work_dir=work_dir,
-                                      on_progress=on_progress, on_event=on_event)
-            except Exception as e:
-                tb = traceback.format_exc()
-                log.error("run_playlist raised: %s", e)
-                for line in tb.strip().split("\n"):
-                    log.error("  %s", line)
-                result = DispatchResult(ok=False, error=f"run_playlist raised: {e}",
-                                        missed_tracks=[tb])
+        _push_event(job_id, {"type": JobEventType.JOB_STARTED, "started_at": job.started_at})
+        _push_job_feed({"type": JobEventType.JOB_STARTED, "job": _job_public(job)})
+        try:
+            result = run_playlist(url, dz_local, SETTINGS, work_dir=work_dir,
+                                  on_progress=on_progress, on_event=on_event)
+        except Exception as e:
+            tb = traceback.format_exc()
+            log.error("run_playlist raised: %s", e)
+            for line in tb.strip().split("\n"):
+                log.error("  %s", line)
+            result = DispatchResult(ok=False, error=f"run_playlist raised: {e}")
     job.result = result
     job.status = DownloadStatus.OK if result.ok else DownloadStatus.ERROR
-    job.name = str(result.name or "")
+    job.playlist_name = str(result.name or "")
     job.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     # Signal SSE subscribers that the job is finished.
-    # Convert Path to str so the event is JSON-serializable.
-    result_copy = dict(result)
-    if "folder" in result_copy:
-        result_copy["folder"] = str(result_copy["folder"])
     _push_event(job_id, {"type": JobEventType.JOB_DONE, "status": job.status,
-                         "result": result_copy})
+                         "result": _jsonable(result)})
     # Also broadcast completion to the shared feed so every tab sees it live.
     _push_job_feed({"type": JobEventType.JOB_DONE, "job": _job_public(job)})
 
@@ -402,33 +438,45 @@ app.mount("/static", StaticFiles(directory=str(REPO / "static")), name="static")
 
 
 def _start_job(url: str, user: str, name: str = "") -> str | None:
-    """Create a Job and kick off its background worker. Shared by POST /download
-    and the sync enqueuer so every start goes through one path (single queue,
-    one DZ_LOCK, identical SSE wiring). `name` is the resolved playlist title,
-    populated up-front by the manual /download path so the card shows it
-    immediately; sync passes "" and the worker fills it on completion.
+    """Create a Job and enqueue it for the sequential drain worker. Shared by
+    POST /download and the sync enqueuer so every start goes through one path.
+    `name` is the resolved playlist title, populated up-front by the manual
+    /download path so the card shows it immediately; sync passes "" and the
+    worker fills it on completion.
 
-    The "already active?" check and the Job insert happen atomically under
-    JOBS_LOCK so two concurrent requests (e.g. two users hitting send at the
-    same instant) can't both pass the check and double-enqueue the same
-    (user, url). Returns the new job_id, or None if an active job for this
-    (user, url) already exists. Callers turn the None into a 409 / skip."""
+    Jobs run ONE AT A TIME (FIFO) on the single drain thread -- see _drain_jobs.
+    A new job sits at status "queued" until every job ahead of it finishes, so
+    the card honestly reflects wait-vs-running.
+
+    The "already active?" check (against both live jobs and the pending queue)
+    and the Job insert happen atomically under JOBS_LOCK so two concurrent
+    requests can't double-enqueue the same (user, url). Returns the new
+    job_id, or None if an active/queued job for this (user, url) already exists.
+    Callers turn the None into a 409 / skip."""
     with JOBS_LOCK:
         for job in JOBS.values():
             if (job.user == user and job.url == url
                     and job.status not in (DownloadStatus.OK, DownloadStatus.ERROR)):
                 return None
+        for job_id in JOB_QUEUE:
+            j = JOBS.get(job_id)
+            if j is not None and j.user == user and j.url == url:
+                return None
         job_id = uuid.uuid4().hex[:12]
-        JOBS[job_id] = Job(
+        JOBS[job_id] = DownloadJob(
             id=job_id,
             url=url,
             user=user,
-            name=name,
+            playlist_name=name,
         )
     # Broadcast to the shared job-feed so every connected tab sees the new job
     # immediately (not just the creator's per-job SSE, and not waiting on a poll).
     _push_job_feed({"type": JobEventType.JOB_CREATED, "job": _job_public(JOBS[job_id])})
-    threading.Thread(target=_run_job, args=(job_id, url, user), daemon=True).start()
+    # Enqueue and ensure the drain thread is alive. The job stays "queued" until
+    # it reaches the head of JOB_QUEUE.
+    with JOB_QUEUE_LOCK:
+        JOB_QUEUE.append(job_id)
+    _ensure_drain_thread()
     return job_id
 
 

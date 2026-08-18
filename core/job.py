@@ -32,12 +32,12 @@ class JobProgress:
 
 
 @dataclass
-class Job:
+class DownloadJob:
     id: str
     url: str
     user: str
-    name: str = ""                          # playlist/album name (from run_playlist result)
-    status: str = "running"                 # running|done|error
+    playlist_name: str = ""                              
+    status: str = "queued"                  # queued|running|done|error
     log: list[str] = field(default_factory=list)
     result: DispatchResult = field(default_factory=DispatchResult) 
     started_at: str = ""

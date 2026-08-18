@@ -423,10 +423,13 @@ class JobCard
    */
   renderSnapshot(job) 
   {
-    this.el.className = "job " + (job.status === "done" ? "done" : job.status === "error" ? "error" : "running");
+    const badge = job.status === "queued" ? "queued"
+                 : job.status === "done" ? "done"
+                 : job.status === "error" ? "error" : "running";
+    this.el.className = "job " + badge;
 
-    const badgeStatus = job.status === "done" ? "done" : job.status === "error" ? "error" : "running";
-    const nameHtml = job.name ? '<span class="pname">' + esc(job.name) + "</span> &nbsp; " : "";
+    const badgeStatus = badge;
+    const nameHtml = job.playlist_name ? '<span class="pname">' + esc(job.playlist_name) + "</span> &nbsp; " : "";
     this.metaEl.innerHTML = '<span class="badge ' + badgeStatus + '">' + esc(job.status) + "</span> &nbsp; " + nameHtml
       + '<span class="clock" title="started">st: ' + fmtClock(job.started_at) + "</span>"
       + '<span class="clock" title="finished">et: ' + fmtClock(job.finished_at) + "</span>";
@@ -1142,7 +1145,7 @@ async function startUpdate(url)
   {
     const event = JSON.parse(e.data);
     const job = event.job;
-    ensureJobCard({ id: job.id, url: job.url, user: job.user, name: job.name, status: job.status || "running" });
+    ensureJobCard({ id: job.id, url: job.url, user: job.user, playlist_name: job.playlist_name, status: job.status });
     ensureJobCard(job).renderSnapshot(job);
   });
 

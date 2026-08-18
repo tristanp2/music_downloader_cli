@@ -5,9 +5,9 @@ This is the importable workhorse used by cli.py, sync.py, and app.py.
     from core.downloader import run_playlist
     result = run_playlist(url, dz, settings, work_dir)
 
-Returns a DispatchResult (dataclass) carrying ok/name/folder/downloaded/skipped/
-missed/failed/missed_tracks. cli_dispatch adds the dispatch fields (routed/port/
-job_id); see DispatchResult.
+Returns a DispatchResult (dataclass) carrying ok/name/downloaded/skipped/
+missed/failed. cli_dispatch tags it with routed ("local"/"server") and job_id;
+see DispatchResult.
 """
 from __future__ import annotations
 
@@ -249,3 +249,4 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
         missed=len(missed),
         failed=failed,
     )
+

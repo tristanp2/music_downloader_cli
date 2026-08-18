@@ -142,7 +142,7 @@ def cli_dispatch(url: str, dz: "Deezer | None" = None, settings: dict | None = N
     port = server_is_up()
     if port is not None:
         r = _post_to_server(port, url, user=user)
-        return replace(r, routed="server", port=port)
+        return replace(r, routed="server")
     # local fallback
     if dz is None or settings is None:
         raise RuntimeError("cli_dispatch local mode requires dz + settings")
