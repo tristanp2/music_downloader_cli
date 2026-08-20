@@ -200,8 +200,12 @@ initUserSelect();
    - libraryRows:  LibraryRow instances, keyed by "lib-<folder>"
    - fetchedTracks: raw /library/<folder> payloads, keyed by folder (cache)
    =========================================================================== */
+/** @type {Map<string, JobCard>} */
 const jobCards = new Map();  // jobId -> JobCard instance
+
+/** @type {Map<string, LibraryRow>} */
 const libraryRows = new Map(); // folderId ("lib-<folder>") -> LibraryRow instance
+
 /** @type {Record<string, LibraryTrack[]>} */
 const fetchedTracks = {};
 
@@ -774,9 +778,6 @@ class LibraryRow
     chevTd.innerHTML = "▶";
     row.appendChild(chevTd);
 
-    const folderTd = document.createElement("td");
-    row.appendChild(folderTd);
-
     const nameTd = document.createElement("td");
     row.appendChild(nameTd);
 
@@ -846,17 +847,15 @@ class LibraryRow
   renderSummary(playlist) 
   {
     const cells = this.row.children;
-    cells[1].textContent = playlist.folder;
+    cells[1].textContent = playlist.name;
 
-    cells[2].textContent = playlist.name;
+    cells[2].textContent = String(playlist.total);
 
-    cells[3].textContent = String(playlist.total);
+    cells[3].textContent = String(playlist.downloaded);
 
-    cells[4].textContent = String(playlist.downloaded);
+    cells[4].textContent = String(playlist.missed);
 
-    cells[5].textContent = String(playlist.missed);
-
-    cells[6].textContent = playlist.fetched_at || "";
+    cells[5].textContent = playlist.fetched_at || "";
   }
 
   // Expand/collapse the track list; fetch + cache it on first open.
@@ -931,6 +930,7 @@ async function refreshPlaylists()
     const tableBody = $("#playlists tbody");
 
     const rows = data.playlists || [];
+
     if (!rows.length) 
     {
       for (const [fid, row] of libraryRows) 
@@ -941,6 +941,8 @@ async function refreshPlaylists()
       tableBody.innerHTML = '<tr><td colspan="9" class="empty">No playlists yet.</td></tr>';
       return;
     }
+    else
+      rows.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
 
     const emptyEl = tableBody.querySelector(".empty");
     if (emptyEl) emptyEl.remove();
@@ -959,6 +961,19 @@ async function refreshPlaylists()
         libraryRows.set(fid, row);
       }
       row.renderSummary(playlist);
+    }
+
+    // Re-order the DOM to match the sorted row order (handles playlists added
+    // after the initial render, which would otherwise land at the bottom).
+    // NOTE: appendChild() moves an existing element to the end of the parent, so this is a simple way to re-order without removing/re-creating.
+    for (let i = 0; i < rows.length; i++) 
+    {
+      const libraryRow = libraryRows.get("lib-" + rows[i].folder);
+      if (libraryRow) 
+      {
+        tableBody.appendChild(libraryRow.row);
+        tableBody.appendChild(libraryRow.detail);
+      }
     }
 
     for (const [fid, row] of libraryRows) 
