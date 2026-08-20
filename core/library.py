@@ -166,15 +166,16 @@ def _index_present_tracks(out_dir: Path) -> list[tuple[Path, str]]:
     """
     if not out_dir.is_dir():
         return []
-    index: list[tuple[Path, str]] = []
-    for f in (*out_dir.glob("*.flac"), *out_dir.glob("*.mp3")):
-        if not _is_complete_audio(f):
+    present_tracks: list[tuple[Path, str]] = []
+    for audio_file in (*out_dir.glob("*.flac"), *out_dir.glob("*.mp3")):
+        if not _is_complete_audio(audio_file):
             continue
-        _, ftitle = _core_artist_title(f.stem)
-        fnt = _normalize(ftitle)
-        if fnt:  # mirrors _title_matches: an empty title can never match
-            index.append((f, fnt))
-    return index
+        _, file_title = _core_artist_title(audio_file.stem)
+        normalized_file_title = _normalize(file_title)
+        # mirrors _title_matches: an empty title can never match
+        if normalized_file_title:
+            present_tracks.append((audio_file, normalized_file_title))
+    return present_tracks
 
 
 def find_existing_in_index(index: list[tuple[Path, str]], title: str) -> Path | None:
@@ -184,12 +185,13 @@ def find_existing_in_index(index: list[tuple[Path, str]], title: str) -> Path | 
     edition, either direction) but with zero disk I/O -- the index is scanned
     in memory. Returns the matched Path or None.
     """
-    want = _normalize(title)
-    if not want:
+    requested_title = _normalize(title)
+    if not requested_title:
         return None
-    for f, fnt in index:
-        if want == fnt or _same_recording_with_edition(want, fnt):
-            return f
+    for audio_file, normalized_file_title in index:
+        if requested_title == normalized_file_title \
+                or _same_recording_with_edition(requested_title, normalized_file_title):
+            return audio_file
     return None
 
 
