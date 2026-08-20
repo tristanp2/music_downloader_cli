@@ -783,10 +783,13 @@ def library_folder(request: Request, folder: str):
         raise HTTPException(status_code=404, detail="playlist.meta.json not found")
     data = json.loads(meta.read_text(encoding="utf-8"))
     tracks = data.get("tracks", []) or []
-    # attach the on-disk filename (if present) using the same title-match the
-    # downloader uses -- robust to the bare naming + Deezer suffixes.
+    # Build a on-disk presence index ONCE (one glob + one tag-parse pass over
+    # the folder) instead of calling find_existing_track() per track -- the old
+    # path re-scanned + re-parsed every audio file for every track, which is an
+    # O(tracks * files) tag-read storm that made large playlists crawl.
+    present_index = core.library._index_present_tracks(fp)
     for t in tracks:
-        flac = find_existing_track(fp, t.get("artist", "").split(), t.get("title", "")) \
+        flac = find_existing_in_index(present_index, t.get("title", "")) \
             if t.get("status") == "downloaded" else None
         t["has_file"] = flac is not None
         t["filename"] = flac.name if flac else None

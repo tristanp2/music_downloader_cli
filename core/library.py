@@ -153,6 +153,46 @@ def find_existing_track(out_dir: Path, artists: list[str], title: str) -> Path |
     return None
 
 
+def _index_present_tracks(out_dir: Path) -> list[tuple[Path, str]]:
+    """Glob the folder ONCE and return [(path, normalized_title), ...] for every
+    COMPLETE audio file. Parses each file's tags exactly once.
+
+    Callers match tracks against this list instead of calling
+    find_existing_track() per track -- that re-scans + re-parses the whole
+    folder for every track, which is an O(tracks * files) tag-read storm that
+    makes a large playlist's library read crawl. One pass here collapses it to
+    O(files). The downstream match is the same _title_matches rule, just run
+    in memory against the prebuilt index.
+    """
+    if not out_dir.is_dir():
+        return []
+    index: list[tuple[Path, str]] = []
+    for f in (*out_dir.glob("*.flac"), *out_dir.glob("*.mp3")):
+        if not _is_complete_audio(f):
+            continue
+        _, ftitle = _core_artist_title(f.stem)
+        fnt = _normalize(ftitle)
+        if fnt:  # mirrors _title_matches: an empty title can never match
+            index.append((f, fnt))
+    return index
+
+
+def find_existing_in_index(index: list[tuple[Path, str]], title: str) -> Path | None:
+    """Match `title` against a prebuilt index from _index_present_tracks().
+
+    Same match rule as find_existing_track (exact normalized OR approved-
+    edition, either direction) but with zero disk I/O -- the index is scanned
+    in memory. Returns the matched Path or None.
+    """
+    want = _normalize(title)
+    if not want:
+        return None
+    for f, fnt in index:
+        if want == fnt or _same_recording_with_edition(want, fnt):
+            return f
+    return None
+
+
 def find_partial_track(out_dir: Path, artists: list[str], title: str) -> Path | None:
     """Return a PARTIAL (incomplete) audio file (FLAC or MP3) in out_dir
     matching the given track, or None.
