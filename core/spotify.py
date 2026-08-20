@@ -229,7 +229,14 @@ def parse_spotify_playlist(token: str, playlist_id: str) -> PlaylistData:
             if not t:
                 continue
             tn = (t.get("name") or "").strip()
-            arts = [(a.get("name") or "").strip() for a in t.get("artists", [])]
+
+            # spotify ref to local track had same artist multiple times. following loop ensures there are no dupes
+            arts = []
+            for raw in (a.get("name") or "" for a in t.get("artists", [])):
+                for piece in raw.split(";"):
+                    piece = piece.strip()
+                    if piece and piece not in arts:
+                        arts.append(piece)
             if tn:
                 position += 1
                 tracks.append(Track(
