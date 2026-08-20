@@ -48,16 +48,15 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from core.config import resolve_output_dir, ARL, read_conf, read_users, CONF_SETTINGS
-from core.deezer import init_deezer
+import core
+from core import config
+from core import downloader
+from core import library
+from core import registry
+from core import spotify
 from deezer import Deezer
-from core.downloader import run_playlist, DispatchResult
-from core.spotify import validate_spotify_url, get_spotify_token, parse_spotify_playlist
-from core.registry import list_playlists
-from core.library import find_existing_track
 from core import server_lock
-from core import log
-from core import attach_uvicorn_loggers
+from core.downloader import DispatchResult
 from core.job import DownloadJob, JobProgress, TrackState
 from core.event_types import JobEventType, DownloadStatus
 
@@ -76,24 +75,24 @@ from contextlib import asynccontextmanager
 async def lifespan(app):
     global DZ, EVENT_LOOP
     EVENT_LOOP = asyncio.get_running_loop()
-    attach_uvicorn_loggers()
+    core.attach_uvicorn_loggers()
     if server_lock.another_server_running():
-        log.error("[startup] another music-downloader server is already running "
+        core.log.error("[startup] another music-downloader server is already running "
                   "(REPO/.server.lock points at a live PID) -- refusing to start")
         return
-    if not ARL.is_file():
-        log.info("[startup] config/.arl missing -- /download will 503 until added")
+    if not config.ARL.is_file():
+        core.log.info("[startup] config/.arl missing -- /download will 503 until added")
     else:
-        arl_text = ARL.read_text(encoding="utf-8").strip()
+        arl_text = config.ARL.read_text(encoding="utf-8").strip()
         try:
-            DZ = init_deezer(arl_text)
-            log.info("[startup] Deezer session established")
+            DZ = core.deezer.init_deezer(arl_text)
+            core.log.info("[startup] Deezer session established")
         except Exception as e:
-            log.warning("[startup] Deezer login failed: %s", e)
+            core.log.warning("[startup] Deezer login failed: %s", e)
     server_lock.write_lock(PORT)
     # Periodic sync: re-enqueue every known playlist as a job on an interval
     # (default 12h). 0 or negative in settings.conf disables it.
-    _sync_interval = float((read_conf(CONF_SETTINGS).get("sync_interval_hours") or "12") or 12)
+    _sync_interval = float((config.read_conf(config.CONF_SETTINGS).get("sync_interval_hours") or "12") or 12)
     start_scheduler(_sync_interval)
     start_liveness_log(60)
     try:
@@ -128,11 +127,10 @@ try:
     import deemix.settings as _dms
     SETTINGS = _dms.load(REPO / "config")
 except Exception as _e:
-    from core import log as _log
-    _log.warning("could not load deemix settings: %s", _e)
+    core.log.warning("could not load deemix settings: %s", _e)
     SETTINGS = {}
 
-WORK_DIR_BASE = resolve_output_dir()
+WORK_DIR_BASE = config.resolve_output_dir()
 WORK_DIR_BASE.mkdir(parents=True, exist_ok=True)
 
 def _require_user(request: Request) -> str:
@@ -140,7 +138,7 @@ def _require_user(request: Request) -> str:
     user = request.query_params.get("user")
     if not user:
         raise HTTPException(status_code=400, detail="missing 'user' query parameter")
-    allowed = read_users()
+    allowed = config.read_users()
     if user not in allowed:
         raise HTTPException(status_code=403, detail="user '{}' not in allowed list ({})".format(user, ",".join(allowed)))
     return user
@@ -269,7 +267,7 @@ def _bind_host() -> str:
     env = os.environ.get("MUSIC_DOWNLOADER_BIND_HOST")
     if env:
         return env
-    return read_conf(REPO / "config" / "settings.conf").get("bind_host") or "0.0.0.0"
+    return config.read_conf(REPO / "config" / "settings.conf").get("bind_host") or "0.0.0.0"
 
 
 BIND_HOST = _bind_host()
@@ -279,7 +277,7 @@ def _server_token() -> str | None:
     env = os.environ.get("MUSIC_DOWNLOADER_SERVER_TOKEN")
     if env:
         return env
-    return read_conf(REPO / "config" / "settings.conf").get("server_token") or None
+    return config.read_conf(REPO / "config" / "settings.conf").get("server_token") or None
 
 
 def _deezer_session_ok() -> bool:
@@ -388,13 +386,13 @@ def _run_job(job_id: str, url: str, user: str) -> None:
         _push_event(job_id, {"type": JobEventType.JOB_STARTED, "started_at": job.started_at})
         _push_job_feed({"type": JobEventType.JOB_STARTED, "job": _job_public(job)})
         try:
-            result = run_playlist(url, dz_local, SETTINGS, work_dir=work_dir,
+            result = downloader.run_playlist(url, dz_local, SETTINGS, work_dir=work_dir,
                                   on_progress=on_progress, on_event=on_event)
         except Exception as e:
             tb = traceback.format_exc()
-            log.error("run_playlist raised: %s", e)
+            core.log.error("run_playlist raised: %s", e)
             for line in tb.strip().split("\n"):
-                log.error("  %s", line)
+                core.log.error("  %s", line)
             result = DispatchResult(ok=False, error=f"run_playlist raised: {e}")
     job.result = result
     job.status = DownloadStatus.OK if result.ok else DownloadStatus.ERROR
@@ -504,7 +502,7 @@ def _derive_user_for_folder(folder_path: Path) -> str:
             return parts[0]
     except Exception:
         pass
-    users = read_users()
+    users = config.read_users()
     return users[0] if users else "tristan"
 
 
@@ -532,7 +530,7 @@ def enqueue_sync_all() -> dict[str, object]:
     """
     if DZ is None or not _deezer_session_ok():
         return {"queued": 0, "jobs": [], "skipped": "deezer session not ready"}
-    playlists = list_playlists(WORK_DIR_BASE)
+    playlists = registry.list_playlists(WORK_DIR_BASE)
     jobs = []
     for pl in playlists:
         url = pl.get("spotify_url")
@@ -565,7 +563,7 @@ def start_scheduler(interval_hours: float) -> None:
     sync is already in flight, the scheduled tick is skipped (next tick retries).
     """
     if not interval_hours or interval_hours <= 0:
-        log.info("[scheduler] disabled (interval <= 0)")
+        core.log.info("[scheduler] disabled (interval <= 0)")
         return
     interval = interval_hours * 3600.0
 
@@ -573,21 +571,21 @@ def start_scheduler(interval_hours: float) -> None:
         while True:
             time.sleep(interval)
             if not _SYNC_LOCK.acquire(blocking=False):
-                log.info("[scheduler] sync already running -- skipping this tick")
+                core.log.info("[scheduler] sync already running -- skipping this tick")
                 continue
             try:
-                log.info("[scheduler] periodic sync starting")
+                core.log.info("[scheduler] periodic sync starting")
                 res = enqueue_sync_all()
-                log.info("[scheduler] periodic sync enqueued %s jobs (%s)",
+                core.log.info("[scheduler] periodic sync enqueued %s jobs (%s)",
                          res.get("queued"), res.get("skipped") or "ok")
             except Exception as e:
-                log.error("[scheduler] sync failed: %s", e)
+                core.log.error("[scheduler] sync failed: %s", e)
             finally:
                 _SYNC_LOCK.release()
 
     t = threading.Thread(target=_loop, name="sync-scheduler", daemon=True)
     t.start()
-    log.info("[scheduler] started, interval = %s h", interval_hours)
+    core.log.info("[scheduler] started, interval = %s h", interval_hours)
 
 
 def start_liveness_log(interval_seconds: int = 60) -> None:
@@ -606,13 +604,13 @@ def start_liveness_log(interval_seconds: int = 60) -> None:
                     clients = len(JOB_FEED_SUBS)
                 with JOBS_LOCK:
                     active = sum(1 for j in JOBS.values() if j.status == "running")
-                log.info("[alive] server up -- %d connected client(s), %d active job(s)",
+                core.log.info("[alive] server up -- %d connected client(s), %d active job(s)",
                          clients, active)
             except Exception as e:
-                log.error("[alive] liveness log failed: %s", e)
+                core.log.error("[alive] liveness log failed: %s", e)
     t = threading.Thread(target=_loop, name="liveness-log", daemon=True)
     t.start()
-    log.info("[alive] liveness log started, interval = %s s", interval_seconds)
+    core.log.info("[alive] liveness log started, interval = %s s", interval_seconds)
 
 
 @app.post("/download")
@@ -629,12 +627,12 @@ def download(request: Request, payload: dict):
 
     # Resolve + validate the playlist identity BEFORE it enters the queue. A
     # garbage URL must surface at the input box, never as a nameless job card.
-    playlist_id = validate_spotify_url(url)
+    playlist_id = spotify.validate_spotify_url(url)
     if not playlist_id:
         raise HTTPException(status_code=400, detail="Invalid Spotify playlist URL")
     try:
-        token = get_spotify_token()
-        parsed = parse_spotify_playlist(token, playlist_id)
+        token = spotify.get_spotify_token()
+        parsed = spotify.parse_spotify_playlist(token, playlist_id)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not resolve Spotify playlist: {e}")
     name = (parsed.get("name") or "").strip()
@@ -749,14 +747,14 @@ def job_status(job_id: str):
 
 @app.get("/users")
 def get_users() -> dict:
-    users = read_users()
+    users = config.read_users()
     return {"users": users, "default": users[0] if users else None}
 
 
 @app.get("/playlists")
 def playlists(request: Request) -> dict:
     user = _require_user(request)
-    return {"playlists": list_playlists(WORK_DIR_BASE / user)}
+    return {"playlists": registry.list_playlists(WORK_DIR_BASE / user)}
 
 
 @app.get("/health")
@@ -766,7 +764,7 @@ def health() -> JSONResponse:
         status_code=200 if ok else 503,
         content={
             "deezer_session": "ok" if ok else "expired",
-            "arl_present": ARL.is_file(),
+            "arl_present": config.ARL.is_file(),
             "jobs_running": sum(1 for j in JOBS.values() if j.status == "running"),
         },
     )
@@ -787,9 +785,9 @@ def library_folder(request: Request, folder: str):
     # the folder) instead of calling find_existing_track() per track -- the old
     # path re-scanned + re-parsed every audio file for every track, which is an
     # O(tracks * files) tag-read storm that made large playlists crawl.
-    present_index = core.library._index_present_tracks(fp)
+    present_index = library._index_present_tracks(fp)
     for t in tracks:
-        flac = find_existing_in_index(present_index, t.get("title", "")) \
+        flac = library.find_existing_in_index(present_index, t.get("title", "")) \
             if t.get("status") == "downloaded" else None
         t["has_file"] = flac is not None
         t["filename"] = flac.name if flac else None
@@ -814,7 +812,7 @@ def library_track_file(request: Request, folder: str, position: int):
     t = next((x for x in tracks if x.get("position") == position), None)
     if not t:
         raise HTTPException(status_code=404, detail="no such track position")
-    flac = find_existing_track(fp, t.get("artist", "").split(), t.get("title", ""))
+    flac = library.find_existing_track(fp, t.get("artist", "").split(), t.get("title", ""))
     if not flac or not flac.is_file():
         raise HTTPException(status_code=404, detail="track file not found on disk")
     return FileResponse(
@@ -856,11 +854,11 @@ def download_zip(request: Request, folder: str):
 def reload(request: Request, payload: dict | None = None):
     _authenticate(request)
     global DZ
-    if not ARL.is_file():
+    if not config.ARL.is_file():
         raise HTTPException(status_code=503, detail="config/.arl missing")
-    arl_text = ARL.read_text(encoding="utf-8").strip()
+    arl_text = config.ARL.read_text(encoding="utf-8").strip()
     try:
-        DZ = init_deezer(arl_text)
+        DZ = core.deezer.init_deezer(arl_text)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Deezer login failed: {e}")
     return {"ok": True, "deezer_session": "ok"}
