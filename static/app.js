@@ -428,8 +428,8 @@ class JobCard
   renderSnapshot(job) 
   {
     const badge = job.status === "queued" ? "queued"
-                 : job.status === "done" ? "done"
-                 : job.status === "error" ? "error" : "running";
+      : job.status === "done" ? "done"
+        : job.status === "error" ? "error" : "running";
     this.el.className = "job " + badge;
 
     const badgeStatus = badge;
@@ -605,6 +605,25 @@ function ensureJobCard(j)
   return card;
 }
 
+// Cap the visible queue so it can't grow unbounded. New jobs are appended last
+// (see JobCard constructor), so the first .job in DOM order is the oldest and
+// safe to drop. Called from both the SSE creation path and the poll reconcile,
+// because the poll only runs on load + user actions and is NOT on a timer — so
+// over a long idle stretch, SSE-created cards would otherwise never be trimmed.
+function trimJobCards() 
+{
+  const MAX_CARDS = 30;
+  const box = $("#jobs");
+  while (box.querySelectorAll(".job").length > MAX_CARDS) 
+  {
+    const first = box.querySelector(".job");
+    if (!first) break;
+    const rid = first.dataset.job;
+    first.remove();
+    if (jobCards.has(rid)) jobCards.delete(rid);
+  }
+}
+
 /**
  * @param {JobSnapshot[]} jobs
  */
@@ -630,17 +649,9 @@ function syncJobs(jobs)
     }
   }
 
-  // Cap the visible queue so it can't grow unbounded; newest jobs are appended last.
-  const MAX_CARDS = 30;
-  const box = $("#jobs");
-  while (box.querySelectorAll(".job").length > MAX_CARDS) 
-  {
-    const first = box.querySelector(".job");
-    if (!first) break;
-    const rid = first.dataset.job;
-    first.remove();
-    if (jobCards.has(rid)) jobCards.delete(rid);
-  }
+  // Keep the rendered queue bounded (see trimJobCards for why this must also
+  // run on the SSE creation path, not just here).
+  trimJobCards();
 
   if (!jobs.length) 
   {
@@ -1162,6 +1173,9 @@ async function startUpdate(url)
     const job = event.job;
     ensureJobCard({ id: job.id, url: job.url, user: job.user, playlist_name: job.playlist_name, status: job.status });
     ensureJobCard(job).renderSnapshot(job);
+    // Trim here too: SSE-created cards are the unbounded-growth path (the /jobs
+    // poll only runs on load + user actions, never on a timer).
+    trimJobCards();
   });
 
   // Per-track progress is relayed by the backend for EVERY job; apply to its card.
