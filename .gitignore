@@ -19,6 +19,12 @@ config/settings.conf
 config/config.json
 config/.arl
 
+# Soulseek binary + secrets (user-installed). The launcher shims
+# (tools/soulseek, tools/soulseek.cmd) and tools/sockseek.conf.template are
+# tracked; the binary + filled conf are NOT.
+tools/sockseek.exe
+tools/sockseek.conf
+
 # Server lockfile + log (runtime artifacts, single-process signal)
 .server.lock
 .server.log
@@ -236,3 +242,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Server logs
+logs
+
+# Local scripts
+local_scripts
