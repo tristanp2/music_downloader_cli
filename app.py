@@ -52,12 +52,14 @@ from core import config
 from core import downloader
 from core import library
 from core import registry
+from core.library import _normalize
 from core import spotify
 from deezer import Deezer
 from core import server_lock
 from core.downloader import DispatchResult
 from core.job import DownloadJob, JobProgress, TrackState
 from core.event_types import JobEventType, DownloadStatus
+from core import soulseek as soulseek_mod
 
 
 PORT = int(os.environ.get("MUSIC_DOWNLOADER_PORT", "8000")) 
@@ -89,6 +91,10 @@ async def lifespan(app):
         except Exception as e:
             core.log.warning("[startup] Deezer login failed: %s", e)
     server_lock.write_lock(PORT)
+    # Soulseek fallback: enable only if configured AND the binary is present.
+    soulseek_mod.init_log(core.log)
+    global SOULSEEK_ENABLED
+    SOULSEEK_ENABLED = soulseek_mod.soulseek_enabled()
     # Periodic sync: re-enqueue every known playlist as a job on an interval
     # (default 12h). 0 or negative in settings.conf disables it.
     _sync_interval = float((config.read_conf(config.CONF_SETTINGS).get("sync_interval_hours") or "12") or 12)
@@ -202,6 +208,7 @@ def _job_public(job: DownloadJob) -> dict:
     """JSON-friendly snapshot of a DownloadJob for the shared feed."""
     return {
         "id": job.id, "url": job.url, "user": job.user, "playlist_name": job.playlist_name,
+        "source": job.source,
         "status": job.status,
         "started_at": job.started_at, "finished_at": job.finished_at,
         # Include progress so a finished job's track rows survive the 10s poll
@@ -324,17 +331,69 @@ def _ensure_drain_thread() -> None:
             _drain_thread.start()
 
 
+def _soulseek_phase_idle() -> bool:
+    """True when Deezer is empty AND no Soulseek sweep is in flight."""
+    with JOB_QUEUE_LOCK:
+        deezer_empty = not JOB_QUEUE
+    with SOULSEEK_QUEUE_LOCK:
+        queue_empty = not SOULSEEK_QUEUE
+    with _SOULSEEK_INFLIGHT_LOCK:
+        no_inflight = not _SOULSEEK_INFLIGHT
+    return deezer_empty and queue_empty and no_inflight
+
+
 def _process_job_queue() -> None:
-    """Pop job_ids FIFO and run each to completion before starting the next."""
+    """Single drain thread.
+
+    Priority order: run every Deezer job in JOB_QUEUE first (FIFO, strictly one
+    at a time -- the Deezer session is shared). Only once the Deezer queue is
+    EMPTY do we start draining SOULSEEK_QUEUE. Soulseek sweeps run IN PARALLEL:
+    each is launched in its own worker thread, so multiple playlist sweeps
+    progress at once. The drain thread keeps polling until both queues are empty
+    AND every in-flight Soulseek sweep has finished, then exits (a new enqueue
+    restarts it).
+    """
     global DZ
     while True:
+        # 1) Deezer jobs take priority; drain them all first (one at a time).
         with JOB_QUEUE_LOCK:
-            if not JOB_QUEUE:
+            if JOB_QUEUE:
+                job_id = JOB_QUEUE.popleft()
+            else:
+                job_id = None
+        if job_id is not None:
+            job = JOBS.get(job_id)
+            if job is not None:
+                _run_job(job_id, job.url, job.user)
+            continue
+        # 2) Deezer queue empty -> launch Soulseek sweeps in parallel. For each
+        #    queued sweep, spawn a worker thread (tracked in _SOULSEEK_INFLIGHT)
+        #    and pop the next. The drain thread does NOT block on a sweep; it
+        #    loops to pick up more sweeps (parallel) or detect idle.
+        launched = False
+        while True:
+            with SOULSEEK_QUEUE_LOCK:
+                if SOULSEEK_QUEUE:
+                    soulseek_job_id = SOULSEEK_QUEUE.popleft()
+                else:
+                    soulseek_job_id = None
+            if soulseek_job_id is None:
+                break
+            t = threading.Thread(target=_run_soulseek_job_threaded,
+                                 args=(soulseek_job_id,), daemon=True)
+            with _SOULSEEK_INFLIGHT_LOCK:
+                _SOULSEEK_INFLIGHT[soulseek_job_id] = t
+            t.start()
+            launched = True
+        # 3) If we just launched sweeps (or some are still in flight), keep
+        #    looping so a newly-enqueued sweep starts promptly and we don't exit
+        #    while sweeps are running. If everything is idle, we're done.
+        if not launched and _soulseek_phase_idle():
+            with JOB_QUEUE_LOCK:
                 _drain_thread = None
-                return
-            job_id = JOB_QUEUE.popleft()
-        url, user = JOBS[job_id].url, JOBS[job_id].user
-        _run_job(job_id, url, user)
+            return
+        # Yield briefly so we don't spin hot while sweeps run in the background.
+        time.sleep(0.5)
 
 
 def _run_job(job_id: str, url: str, user: str) -> None:
@@ -391,8 +450,12 @@ def _run_job(job_id: str, url: str, user: str) -> None:
         _push_event(job_id, {"type": JobEventType.JOB_STARTED, "started_at": job.started_at})
         _push_job_feed({"type": JobEventType.JOB_STARTED, "job": _job_public(job)})
         try:
+            # Run the Deezer pass. run_playlist skips any track already present
+            # on disk (Deezer OR Soulseek source) and enqueues a Soulseek sweep
+            # for whatever Deezer still misses.
             result = downloader.run_playlist(url, dz_local, SETTINGS, work_dir=work_dir,
-                                  on_progress=on_progress, on_event=on_event)
+                                  on_progress=on_progress, on_event=on_event,
+                                  on_enqueue_soulseek=_enqueue_soulseek_sweep)
         except Exception as e:
             tb = traceback.format_exc()
             core.log.error("run_playlist raised: %s", e)
@@ -417,6 +480,167 @@ def _authenticate(request: Request) -> None:
     provided = request.headers.get("X-Auth-Token")
     if provided != token:
         raise HTTPException(status_code=401, detail="missing/invalid X-Auth-Token")
+
+
+# ---------------------------------------------------------------------------
+# Soulseek fallback -- runs in the SAME sequential drain as Deezer jobs.
+# A Deezer pass that leaves tracks `missed` enqueues a Soulseek sweep
+# (source='soulseek') onto JOB_QUEUE; the single drain thread runs it after the
+# current job, so only one job (Deezer OR Soulseek) is ever in flight. Soulseek
+# never touches the Deezer session, but sharing the queue keeps the job log
+# ordered instead of interleaved. A per-playlist lock (core.library.playlist_lock)
+# keeps the Deezer pass and a later Soulseek sweep for the SAME playlist from
+# doing disk work on it at once. Enqueue is a no-op unless the feature is
+# enabled AND the sockseek binary is present (core.soulseek.soulseek_enabled).
+# ---------------------------------------------------------------------------
+
+SOULSEEK_ENABLED = False   # set True in lifespan once soulseek.soulseek_enabled()
+
+# Separate Soulseek queue. The single drain thread (_process_job_queue) drains
+# JOB_QUEUE (Deezer) first and only starts on SOULSEEK_QUEUE once Deezer is
+# empty, so sweeps never interleave with Deezer work. Enqueueing a Soulseek job
+# restarts the drain thread (if idle) via _ensure_drain_thread(). Unlike Deezer
+# (one at a time), Soulseek sweeps run IN PARALLEL: each is launched in its own
+# worker thread, so multiple playlist sweeps progress at once after Deezer drains.
+SOULSEEK_QUEUE: deque[str] = deque()
+SOULSEEK_QUEUE_LOCK = threading.Lock()
+# Soulseek sweep worker threads currently in flight (job_id -> Thread). The drain
+# thread tracks these so it knows when the Soulseek phase is truly idle (all
+# sweeps done AND queue empty) before declaring itself finished.
+_SOULSEEK_INFLIGHT: dict[str, threading.Thread] = {}
+_SOULSEEK_INFLIGHT_LOCK = threading.Lock()
+
+
+def _run_soulseek_job_threaded(job_id: str) -> None:
+    """Wrapper so a Soulseek sweep runs in its own thread (parallel) but is
+    still tracked in _SOULSEEK_INFLIGHT for idle detection."""
+    try:
+        _run_soulseek_job(job_id)
+    finally:
+        with _SOULSEEK_INFLIGHT_LOCK:
+            _SOULSEEK_INFLIGHT.pop(job_id, None)
+
+
+
+
+
+def _run_soulseek_job(job_id: str) -> None:
+    """Run one Soulseek sweep to completion.
+
+    Emits the SAME track-progress event contract as a Deezer job so the frontend
+    renders both with one code path: a `tracks` event (full missed list, all
+    pending) at start, then a `done` event per track (downloaded | missed) once
+    the sweep finishes. The job card therefore shows the tracklist + per-track
+    status exactly like a Deezer card.
+    """
+    job = JOBS.get(job_id)
+    if job is None:
+        return
+    folder, user, work_dir, missed, total = job.soulseek_payload  # type: ignore[attr-defined]
+    lines = job.log
+    with JOBS_LOCK:
+        job.status = "running"
+        job.started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+    _push_event(job_id, {"type": JobEventType.JOB_STARTED, "started_at": job.started_at})
+    _push_job_feed({"type": JobEventType.JOB_STARTED, "job": _job_public(job)})
+
+    # Build the per-track display list (matches downloader's "Artist - Title").
+    track_items = []
+    for m in missed:
+        artists = m.get("artists") or []
+        name = m.get("name") or ""
+        display = (" - ".join(artists) + " - " + name) if artists else name
+        track_items.append({"pos": m.get("position", 0), "name": display[:120]})
+
+    # Emit the tracklist up front so the card populates immediately (Soulseek
+    # has no fine-grained byte progress -- these just sit at "pending" until the
+    # sweep resolves them into downloaded/missed below).
+    _push_event(job_id, {"type": JobEventType.TRACKS, "total": len(track_items), "items": track_items})
+    _push_job_feed({"type": JobEventType.TRACKS, "job_id": job_id, "total": len(track_items), "items": track_items})
+
+    # Map position -> display name (built from the same track_items we already
+    # sent in the `tracks` event) so the live START event carries the real title
+    # instead of an empty string -- otherwise the frontend wipes the row title
+    # the moment the progress bar appears.
+    name_by_pos = {item["pos"]: item["name"] for item in track_items}
+
+    def _soulseek_live_event(kind: str, pos: int, ok: bool = True) -> None:
+        if kind == "start":
+            _push_event(job_id, {"type": JobEventType.START, "pos": pos, "name": name_by_pos.get(pos, ""), "pct": 0})
+            _push_job_feed({"type": JobEventType.START, "job_id": job_id, "pos": pos, "name": name_by_pos.get(pos, ""), "pct": 0})
+        elif kind == "done":
+            # Live provisional status: succeeded -> downloaded, failed -> missed.
+            # The end-of-sweep batch below re-resolves every track against
+            # landed_positions (authoritative) and may still flip a "succeeded"
+            # to "missed" if it fails the lossless gate.
+            status = "downloaded" if ok else "missed"
+            _push_event(job_id, {"type": JobEventType.DONE, "pos": pos, "status": status, "pct": 100})
+            _push_job_feed({"type": JobEventType.DONE, "job_id": job_id, "pos": pos, "status": status, "pct": 100})
+
+    try:
+        result = soulseek_mod.run_soulseek_sweep(folder, user, work_dir, missed, total,
+                                                 on_progress=lines.append,
+                                                 on_event=_soulseek_live_event)
+    except Exception as e:
+        tb = traceback.format_exc()
+        core.log.error("soulseek sweep raised: %s", e)
+        for line in tb.strip().split("\n"):
+            core.log.error("  %s", line)
+        result = {"ok": False, "error": f"soulseek sweep raised: {e}",
+                  "downloaded": 0, "missed": len(missed), "landed_positions": []}
+
+    landed_positions = set(result.get("landed_positions", []))
+    # Resolve the missed list into per-track done events: landed -> downloaded,
+    # otherwise missed (peer offline / not shared / failed the lossless gate).
+    for m in missed:
+        pos = m.get("position", 0)
+        status = "downloaded" if pos in landed_positions else "missed"
+        _push_event(job_id, {"type": JobEventType.DONE, "pos": pos, "status": status, "pct": 100})
+        _push_job_feed({"type": JobEventType.DONE, "job_id": job_id, "pos": pos, "status": status, "pct": 100})
+
+    # Record a lightweight result so the card renders the breakdown.
+    job.result = DispatchResult(
+        ok=result.get("ok", False),
+        name=job.playlist_name,
+        downloaded=result.get("downloaded", 0),
+        missed=result.get("missed", 0),
+        error=result.get("error", ""),
+    )
+    job.status = DownloadStatus.OK if result.get("ok") else DownloadStatus.ERROR
+    job.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+    _push_event(job_id, {"type": JobEventType.JOB_DONE, "status": job.status,
+                         "result": _jsonable(result)})
+    _push_job_feed({"type": JobEventType.JOB_DONE, "job": _job_public(job)})
+
+
+def _enqueue_soulseek_sweep(folder: str, user: str, work_dir: Path, missed: list[dict], total: int) -> None:
+    """Hook passed to run_playlist: enqueue a Soulseek sweep for one playlist's
+    missed tracks. Distinct job key (source='soulseek') so the dedupe in
+    _start_job doesn't swallow it as a duplicate of the Deezer job for the same
+    playlist. The sweep goes onto SOULSEEK_QUEUE, which the single drain thread
+    only starts once JOB_QUEUE (Deezer) is empty -- so sweeps never interleave
+    with Deezer work.
+    """
+    if not SOULSEEK_ENABLED:
+        return
+    with JOBS_LOCK:
+        global NEXT_JOB_ID
+        NEXT_JOB_ID += 1
+        job_id = str(NEXT_JOB_ID)
+        job = DownloadJob(
+            id=job_id,
+            url=f"soulseek:{folder}",
+            user=user,
+            playlist_name=folder,
+            source="soulseek",
+        )
+        job.soulseek_payload = (folder, user, work_dir, missed, total)  # type: ignore[attr-defined]
+        JOBS[job_id] = job
+    _push_job_feed({"type": JobEventType.JOB_CREATED, "job": _job_public(job)})
+    with SOULSEEK_QUEUE_LOCK:
+        SOULSEEK_QUEUE.append(job_id)
+    # Restart the single drain thread (it drains Deezer first, then Soulseek).
+    _ensure_drain_thread()
 
 
 # ---------------------------------------------------------------------------

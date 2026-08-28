@@ -131,6 +131,7 @@
      inner region can scroll instead of expanding the page. The "new download"
      card stays a normal block so its input/buttons lay out inline. */
   .card:has(> #jobs),
+  .card.job-tabs-card,
   .card:has(> .lib-scroll) {
     display: flex;
     flex-direction: column;
@@ -208,15 +209,33 @@
 
   .empty { color: var(--text-d); font-size: 11px; }
 
-  /* ---- job cards ---- */
-  #jobs { 
-    flex: 1; 
-    min-height: 0; 
-    overflow-y: auto; 
+  /* ---- job cards (tabbed: Jobs / Fallback, each pane = original queue look) ---- */
+  .job-tab-bar { display: flex; }
+  .job-tab {
+    font-family: var(--mono);
+    font-size: 12px; letter-spacing: 0.06em;
+    padding: 4px 14px; margin: 0;
+    background: transparent; color: var(--text-d);
+    border: 1px solid var(--border); cursor: pointer;
+    border-bottom: none;
+    user-select: none;
+  }
+  .job-tab:hover { color: var(--text); border-color: var(--border-h); }
+  .job-tab.active { color: var(--text-b); border-color: var(--accent-d); background: var(--accent-d); }
+  .job-tab #fallback-count { font-size: 10px; opacity: 0.85; }
+  /* The pane IS the scroll container, mirroring the original #jobs: flex column,
+     min-height:0 so it can shrink, overflow scrolls. This is what was missing
+     from the first broken tab version (panels were display:none w/ no height). */
+  .job-tab-pane {
+    display: none;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
     padding: 2px;
-    padding-right: 4px; 
+    padding-right: 4px;
     border: #252525 1px solid;
   }
+  .job-tab-pane.active { display: block; }
   .job {
     border: 1px solid var(--border);
     padding: 10px;
@@ -365,9 +384,14 @@
     <div id="msg" class="stats"></div>
   </section>
 
-  <section class="card">
+  <section class="card job-tabs-card">
     <h2>job queue</h2>
-    <div id="jobs"><div class="empty">No jobs yet.</div></div>
+    <div class="job-tab-bar">
+      <div id="tab-jobs" class="job-tab active">Jobs</div>
+      <div id="tab-fallback" class="job-tab">Fallback <span id="fallback-count"></span></div>
+    </div>
+    <div id="jobs" class="job-tab-pane active"><div class="empty">No jobs yet.</div></div>
+    <div id="fallback-jobs" class="job-tab-pane"><div class="empty">No fallback jobs yet.</div></div>
   </section>
 
   <section class="card" style="grid-column: 1 / -1;">

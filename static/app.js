@@ -290,7 +290,13 @@ class TrackRow
     this.listEl.querySelector('.track-row[data-pos="' + track.pos + '"]');
     const row = this.el;
 
-    row.querySelector(".pos").textContent = track.pos + "/" + total;
+    // Show the row's 1-based index within THIS job card's track list (not the
+    // original playlist position / total) -- for Soulseek, track.pos is the
+    // original playlist position and total is the missed count, which rendered
+    // as confusing "45 / 6". Row order in the card is what matters here.
+    const siblings = Array.prototype.slice.call(this.listEl.querySelectorAll(".track-row"));
+    const idx = siblings.indexOf(row) + 1;
+    row.querySelector(".pos").textContent = idx > 0 ? String(idx) : "";
 
     const nameSpan = row.querySelector(".track-name");
     nameSpan.textContent = track.name;
@@ -354,6 +360,7 @@ class JobCard
   {
     this.id = j.id;
     this.open = false;
+    this.source = j.source || "deezer";   // "deezer" | "soulseek"
     this.counts = { downloaded: 0, skipped: 0, missed: 0, failed: 0 };
     this.rows = new Map();  // pos -> TrackRow
 
@@ -403,8 +410,11 @@ class JobCard
     this.urlEl = urlEl;
     this.listEl = listEl;
 
-    $("#jobs").appendChild(card);
-    const empty = $("#jobs .empty");
+    // Route into the right tab: Deezer -> #jobs, Soulseek -> #fallback-jobs.
+    const containerId = this.source === "soulseek" ? "#fallback-jobs" : "#jobs";
+    const container = $(containerId) || $("#jobs");
+    container.appendChild(card);
+    const empty = container.querySelector(".empty");
     if (empty) empty.remove();
   }
 
@@ -434,7 +444,10 @@ class JobCard
 
     const badgeStatus = badge;
     const nameHtml = job.playlist_name ? '<span class="pname">' + esc(job.playlist_name) + "</span> &nbsp; " : "";
+    const sourceHtml = job.source === "soulseek"
+      ? ' &nbsp; <span class="badge soulseek">soulseek</span>' : "";
     this.metaEl.innerHTML = '<span class="badge ' + badgeStatus + '">' + esc(job.status) + "</span> &nbsp; " + nameHtml
+      + sourceHtml
       + '<span class="clock" title="started">st: ' + fmtClock(job.started_at) + "</span>"
       + '<span class="clock" title="finished">et: ' + fmtClock(job.finished_at) + "</span>";
 
@@ -498,7 +511,14 @@ class JobCard
     else if (type === "start") 
     {
       const row = this.rows.get(event.pos);
-      if (row) row.render({ pos: event.pos, name: event.name, status: "downloading", pct: 0 }, this.listEl.querySelectorAll(".track-row").length);
+      if (row) 
+      {
+        // Preserve the existing title if the event carries none (defensive -- a
+        // START event should never blank a row that the `tracks` event named).
+        const existingName = row.el.querySelector(".track-name").textContent;
+        const name = event.name || existingName || "";
+        row.render({ pos: event.pos, name: name, status: "downloading", pct: 0 }, this.listEl.querySelectorAll(".track-row").length);
+      }
 
     }
     else if (type === "pct") 
@@ -602,6 +622,7 @@ function ensureJobCard(j)
     card = new JobCard(j);
     jobCards.set(j.id, card);
   }
+  updateFallbackCount();
   return card;
 }
 
@@ -613,14 +634,18 @@ function ensureJobCard(j)
 function trimJobCards() 
 {
   const MAX_CARDS = 30;
-  const box = $("#jobs");
-  while (box.querySelectorAll(".job").length > MAX_CARDS) 
+  // Trim across BOTH tab containers (Deezer + Soulseek) so the combined set of
+  // job cards never grows unbounded.
+  const total = jobCards.size;
+  if (total <= MAX_CARDS) return;
+  const overflow = total - MAX_CARDS;
+  let removed = 0;
+  for (const [id, card] of jobCards) 
   {
-    const first = box.querySelector(".job");
-    if (!first) break;
-    const rid = first.dataset.job;
-    first.remove();
-    if (jobCards.has(rid)) jobCards.delete(rid);
+    if (removed >= overflow) break;
+    card.remove();
+    jobCards.delete(id);
+    removed++;
   }
 }
 
@@ -653,12 +678,17 @@ function syncJobs(jobs)
   // run on the SSE creation path, not just here).
   trimJobCards();
 
-  if (!jobs.length) 
+  // Restore an empty-state placeholder into whichever tab container lost all of
+  // its cards (Deezer -> #jobs, Soulseek -> #fallback-jobs).
+  const containers = { deezer: "#jobs", soulseek: "#fallback-jobs" };
+  for (const key in containers) 
   {
-    const box = $("#jobs");
-    if (!box.querySelector(".empty")) 
+    const box = $(containers[key]);
+    if (!box) continue;
+    const hasCards = Array.from(box.children).some(el => el.classList.contains("job"));
+    if (!hasCards && !box.querySelector(".empty")) 
     {
-      box.innerHTML = '<div class="empty">No jobs yet.</div>';
+      box.innerHTML = '<div class="empty">No ' + (key === "soulseek" ? "fallback" : "") + ' jobs yet.</div>';
     }
   }
 }
@@ -1171,7 +1201,7 @@ async function startUpdate(url)
   {
     const event = JSON.parse(e.data);
     const job = event.job;
-    ensureJobCard({ id: job.id, url: job.url, user: job.user, playlist_name: job.playlist_name, status: job.status });
+    ensureJobCard({ id: job.id, url: job.url, user: job.user, playlist_name: job.playlist_name, source: job.source, status: job.status });
     ensureJobCard(job).renderSnapshot(job);
     // Trim here too: SSE-created cards are the unbounded-growth path (the /jobs
     // poll only runs on load + user actions, never on a timer).
@@ -1179,12 +1209,16 @@ async function startUpdate(url)
   });
 
   // Per-track progress is relayed by the backend for EVERY job; apply to its card.
-  ["tracks", "start", "pct", "done"].forEach(function(type) 
+  ["tracks", "start", "pct", "done"].forEach(function(type)
   {
-    eventSource.addEventListener(type, function(e) 
+    eventSource.addEventListener(type, function(e)
     {
       const event = JSON.parse(e.data);
-      ensureJobCard({ id: event.job_id, url: "", user: "", status: "running" });
+      // The card already exists (job_created / job_started fired first and set
+      // its source), so just apply. Guard: if it somehow doesn't exist yet, skip
+      // rather than referencing an undefined `job.source` (old bug).
+      const card = jobCards.get(event.job_id);
+      if (!card) return;
       applyTrackEvent(event.job_id, type, event);
     });
   });
@@ -1222,6 +1256,60 @@ async function startUpdate(url)
     showOverlay(true);
   };
 })();
+
+/* ===========================================================================
+   JOB TABS  (Deezer = "Jobs", Soulseek = "Fallback")
+   JobCards still route into #jobs / #fallback-jobs (see JobCard ctor). The tab
+   bar just shows/hides the two panes; each pane keeps the ORIGINAL queue look
+   and its own scroll. The Fallback tab shows a live "(n)" count of soulseek jobs.
+   =========================================================================== */
+/**
+ * @param {"jobs"|"fallback"} tab
+ */
+function setJobTab(tab) 
+{
+  const jobsTab = $("#tab-jobs");
+  const fbTab = $("#tab-fallback");
+  const jobsPane = $("#jobs");
+  const fbPane = $("#fallback-jobs");
+  if (jobsTab) jobsTab.classList.toggle("active", tab === "jobs");
+  if (fbTab) fbTab.classList.toggle("active", tab === "fallback");
+  if (jobsPane) jobsPane.classList.toggle("active", tab === "jobs");
+  if (fbPane) fbPane.classList.toggle("active", tab === "fallback");
+}
+
+// Live "(n)" badge on the Fallback tab from the current card set.
+function updateFallbackCount() 
+{
+  let n = 0;
+  for (const [, card] of jobCards) 
+  {
+    if (card.source === "soulseek") n++;
+  }
+  const el = $("#fallback-count");
+  if (el) el.textContent = n ? "(" + n + ")" : "";
+}
+
+function initJobTabs() 
+{
+  const jobsTab = $("#tab-jobs");
+  const fbTab = $("#tab-fallback");
+  if (jobsTab) jobsTab.addEventListener("click", () => setJobTab("jobs"));
+  if (fbTab) fbTab.addEventListener("click", () => setJobTab("fallback"));
+  setJobTab("jobs");
+  updateFallbackCount();
+}
+
+// Keep the badge in sync whenever the job set changes (poll + SSE creation).
+const _origSyncJobs = syncJobs;
+function syncJobsWrapped(jobs) 
+{
+  _origSyncJobs(jobs);
+  updateFallbackCount();
+}
+syncJobs = syncJobsWrapped;
+
+initJobTabs();
 
 refreshHealth();
 refreshJobs();

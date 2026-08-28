@@ -1,0 +1,18 @@
+# sockseek.conf (TEMPLATE -- copy to sockseek.conf and fill in)
+# gitignored once filled. Holds your Soulseek credentials + the output dir.
+#
+# IMPORTANT: output-dir is the SINGLE source of truth for where sockseek writes
+# files. The launcher shim forwards ONLY --config + --pref-format; it does NOT
+# pass -o, so editing output-dir here actually takes effect.
+
+# Free Soulseek account username / password (register at soulseek.ca).
+username = <your soulseek username>
+password = <your soulseek password>
+
+# Where sockseek writes downloaded tracks. The downloader's Soulseek sweep
+# stages into a subfolder of this and moves files into the playlist layout.
+# Point it at (or inside) the music_downloader_outputs root so staging is local.
+output-dir = C:\Users\TPartridge\Music\music_downloader_outputs
+
+# Prefer FLAC, fall back to WAV/MP3 when no lossless is shared by a peer.
+pref-format = flac,wav

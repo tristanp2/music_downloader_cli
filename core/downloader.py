@@ -21,7 +21,7 @@ from .config import resolve_output_dir, read_conf
 from .spotify import safe_folder_name, validate_spotify_url, get_spotify_token, parse_spotify_playlist
 from .deezer import deezer_search, deemix_download, _dz_field
 from deezer import Deezer
-from .library import find_existing_track, find_partial_track, tag_and_rename, write_meta
+from .library import find_existing_track, find_partial_track, tag_and_rename, write_meta, _normalize
 from .track import Track
 from .event_types import JobEventType, DownloadStatus
 
@@ -47,7 +47,7 @@ class DispatchResult:
     error: str = ""
 
 
-def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None = None, on_progress: Callable[[str], None] | None = None, on_event: Callable[[dict], None] | None = None) -> "DispatchResult":
+def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None = None, on_progress: Callable[[str], None] | None = None, on_event: Callable[[dict], None] | None = None, on_enqueue_soulseek: Callable[[str, str, Path, list[dict], int], None] | None = None) -> "DispatchResult":
     """Download one Spotify playlist/album/track. Returns a result dict.
 
     Parameters
@@ -158,6 +158,12 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
         # check skip
         existing = find_existing_track(out_dir, t.artists, t.name)
         if existing:
+            # Already present on disk (Deezer OR Soulseek source) -> skip.
+            # This is the primary gate. The old code treated soulseek-sourced
+            # tracks as "not present" so Deezer could override them, but that
+            # forced already-landed Soulseek files back through
+            # Deezer -> miss -> Soulseek re-queue -> re-download of the same
+            # file on every sync. If the file is here and recognized, it's done.
             report(f"[{pos}/{total}] {display[:60]}")
             report(f"    [skip] already present: {existing.name}")
             event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.SKIPPED, "pct": 100})
@@ -200,12 +206,12 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
         if not matched_track:
             report("    [deezer] no match")
             event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.MISSED, "pct": 0})
-            missed.append({"name": t.name, "artists": t.artists})
+            missed.append({"name": t.name, "artists": t.artists, "position": pos})
             statuses.append("missed")
             continue
         dz_url = matched_track.get("link")
         if not dz_url:
-            missed.append({"name": t.name, "artists": t.artists})
+            missed.append({"name": t.name, "artists": t.artists, "position": pos})
             event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.MISSED, "pct": 0})
             statuses.append("missed")
             continue
@@ -225,7 +231,7 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
         else:
             report("    [deezer] download failed")
             event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.FAILED, "pct": 0})
-            missed.append({"name": t.name, "artists": t.artists})
+            missed.append({"name": t.name, "artists": t.artists, "position": pos})
             statuses.append("missed")
             failed += 1
 
@@ -239,6 +245,18 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
         report(f"\n[!] {len(missed)} tracks unmatched by Deezer (see status in playlist.meta.json):")
         for mt in missed:
             report("   - " + " ".join(mt["artists"]) + " " + mt["name"])
+
+    # Soulseek fallback: if the feature is enabled and this Deezer pass left
+    # tracks missed, hand the missed set to the Soulseek worker. The sweep runs
+    # in a SEPARATE parallel queue (not the Deezer drain), so it never blocks
+    # the next Deezer playlist. It lands files in this same folder and flips
+    # their meta `source` to 'soulseek'; a later Deezer pass overrides them.
+    # `on_enqueue_soulseek` is injected by app.py (None in CLI mode).
+    if missed and on_enqueue_soulseek is not None:
+        try:
+            on_enqueue_soulseek(folder, work_dir.name, work_dir, missed, total)
+        except Exception as e:
+            report(f"[warn] soulseek enqueue failed: {e}")
     report("")
 
     return DispatchResult(

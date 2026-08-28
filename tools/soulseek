@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Launcher shim for sockseek (Soulseek P2P fallback).
+# Forwards only --config + --pref-format + args. MUST NOT pass -o/--output:
+# doing so silently defeats sockseek.conf's `output-dir` (the single source of
+# truth for where files land).
+exec "$(dirname "$0")/sockseek.exe" --config "$(dirname "$0")/sockseek.conf" --pref-format "flac,wav" "$@"

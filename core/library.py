@@ -6,6 +6,7 @@ No network, no session. Importable by app.py, sync.py, and the CLI alike.
 from __future__ import annotations
 
 import re
+import threading
 from pathlib import Path
 
 from mutagen.flac import FLAC
@@ -33,6 +34,25 @@ def _core_artist_title(stem: str) -> tuple[str, str]:
         artist, _, title = stem.partition(" - ")
         return artist.strip(), title.strip()
     return "", stem
+
+
+def _read_title_tag(path: Path) -> str | None:
+    """Return the file's TITLE tag (FLAC Vorbis TITLE or MP3 TIT2), else None.
+
+    Used by _title_matches so a Soulseek file whose FILENAME carries a redundant
+    artist prefix still matches by its real, tagged title.
+    """
+    try:
+        audio = mutagen_file(str(path))
+        if not audio or not audio.tags:
+            return None
+        for k in ("TITLE", "title", "TIT2"):
+            v = audio.tags.get(k)
+            if v:
+                return str(v[0]) if isinstance(v, list) else str(v)
+    except Exception:
+        return None
+    return None
 
 
 def _is_complete_audio(path: Path) -> bool:
@@ -72,37 +92,55 @@ def _is_complete_audio(path: Path) -> bool:
 
 
 def _title_matches(flac_path: Path, title: str) -> bool:
-    """Return True if the on-disk FLAC's TITLE (parsed from the filename) is a
-    match for the requested Spotify title, meaning "same recording -> skip".
+    """Return True if the on-disk file's title (filename stem OR actual TITLE
+    tag) is a match for the requested Spotify title -- meaning "same recording
+    -> skip".
 
-    Match rule, in order:
+    Match rule, in order, for BOTH the filename stem title and the TITLE tag:
       1. Exact normalized equality (case/punctuation-insensitive).
-      2. Approved-edition match in EITHER direction: one title equals the other
+      2. Containment (either direction), when the shorter side is >= 4 chars.
+         Handles Soulseek files whose title carries a redundant artist prefix
+         (e.g. a track titled "In The Back" lands as "Jafu - In The Back", so
+         neither the stem nor the tag equals "In The Back" -- but "In The Back"
+         is contained in "Jafu - In The Back").
+      3. Approved-edition match in EITHER direction: one title equals the other
          plus exactly a recognized SAME-RECORDING marker -- "(Original Mix)" or
          "(Extended Mix)". This tolerates the Spotify<->Deezer labeling
          inconsistency (one service carries the suffix, the other doesn't).
 
-    Anything else is treated as a DIFFERENT recording and is NOT skipped --
-    including any remix/version tail ("(Mystic State Remix)", "VIP Mix", "Dub",
-    "Radio Edit"), because those are distinct tracks, not just labelled editions.
-    This is what previously broke: the old substring-containment rule let
-    "Seek & Move - Mystic State Remix" falsely match the base "Seek & Move".
+    A remix/version tail ("(Mystic State Remix)", "VIP Mix", "Dub", "Radio
+    Edit") is NOT matched by containment (too short / wrong shape) and is
+    treated as a DIFFERENT recording -- not skipped. This is what previously
+    broke: the old substring rule let "Seek & Move - Mystic State Remix" falsely
+    match the base "Seek & Move".
 
     NOTE: duration-based fallback is intentionally NOT here yet -- see the
-    planned tier 3. Title-only for now.
+    planned tier 4. Title-only (+ containment + editions) for now.
     """
     want = _normalize(title)
     if not want:
         return False
-    _, ftitle = _core_artist_title(flac_path.stem)
-    fnt = _normalize(ftitle)
-    if not fnt:
+
+    def _same(a: str, b: str) -> bool:
+        if not a or not b:
+            return False
+        if a == b:
+            return True
+        # containment, bounded so a short title can't swallow a long one
+        if len(a) >= 4 and len(b) >= 4 and (a in b or b in a):
+            return True
         return False
-    # 1. exact
-    if want == fnt:
+
+    # (a) filename stem title
+    _, ftitle = _core_artist_title(flac_path.stem)
+    if _same(want, _normalize(ftitle)):
         return True
-    # 2. approved-edition match, either direction
-    return _same_recording_with_edition(want, fnt)
+    # (b) actual TITLE tag (Soulseek files may prefix the artist into the title)
+    tag_title = _read_title_tag(flac_path)
+    if tag_title and _same(want, _normalize(tag_title)):
+        return True
+    # (c) approved-edition match against the stem title
+    return _same_recording_with_edition(want, _normalize(ftitle))
 
 
 # Recognized SAME-RECORDING edition markers. Conservative on purpose: only
@@ -274,16 +312,44 @@ def _write_position(path: Path, position: int, total: int) -> None:
 # meta write
 # ---------------------------------------------------------------------------
 
-def write_meta(out_dir: Path, spotify_url: str, spotify_id: str, name: str, tracks: list[Track], statuses: list[str]) -> Path:
+# ---------------------------------------------------------------------------
+# provenance lock
+# ---------------------------------------------------------------------------
+# One lock per playlist (keyed by the absolute folder path) so the Deezer drain
+# and the parallel Soulseek sweep never do disk work on the SAME playlist at the
+# SAME time. Cross-source disk work (writing FLACs / mutating playlist.meta.json)
+# must be serialized per playlist; the Deezer session itself stays single-owner
+# on its own drain thread and is untouched by this lock.
+PLAYLIST_LOCKS: dict[Path, threading.Lock] = {}
+PLAYLIST_LOCKS_LOCK = threading.Lock()
+
+
+def playlist_lock(out_dir: Path) -> threading.Lock:
+    """Return (creating lazily) the per-playlist lock for `out_dir`."""
+    key = out_dir.resolve()
+    with PLAYLIST_LOCKS_LOCK:
+        lock = PLAYLIST_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            PLAYLIST_LOCKS[key] = lock
+        return lock
+
+
+def write_meta(out_dir: Path, spotify_url: str, spotify_id: str, name: str, tracks: list[Track], statuses: list[str], sources: dict[int, str] | None = None) -> Path:
     """Write playlist.meta.json into the playlist folder so a future sync cron
     can re-query Spotify and download only tracks not already fetched.
 
     Records the source URL/ID, playlist name, fetch time, and per-track:
     position, spotify_uri (stable key), artist, title, status
-    (downloaded or missed). status comes from the parallel statuses list
-    (same order as tracks).
+    (downloaded or missed), and source (the provenance of the on-disk file:
+    'deezer' or 'soulseek'). status comes from the parallel statuses list
+    (same order as tracks). `sources` (optional) maps position -> provenance;
+    tracks absent from it default to 'deezer'. The Soulseek sweep rewrites the
+    'source' of tracks it landed via update_track_sources -- see that function.
     """
     import time as _time
+    if sources is None:
+        sources = {}
     out_dir.mkdir(parents=True, exist_ok=True)
     meta = {
         "spotify_url": spotify_url,
@@ -299,6 +365,7 @@ def write_meta(out_dir: Path, spotify_url: str, spotify_id: str, name: str, trac
             "artist": " ".join(t.artists),
             "title": t.name,
             "status": st,
+            "source": sources.get(t.position, "deezer"),
         })
     path = out_dir / "playlist.meta.json"
     path.write_text(
@@ -306,3 +373,32 @@ def write_meta(out_dir: Path, spotify_url: str, spotify_id: str, name: str, trac
         encoding="utf-8",
     )
     return path
+
+
+def update_track_sources(out_dir: Path, sources: dict[int, str]) -> None:
+    """Rewrite the `source` provenance field of the named positions in
+    playlist.meta.json, and flip their `status` to "downloaded" (a landed
+    Soulseek file is, by definition, present -- leaving it "missed" while
+    source=soulseek is internally contradictory and makes the sync gate think
+    the track is absent).
+
+    Called by the Soulseek sweep after it lands files, so the Deezer skip-check
+    can tell Soulseek-sourced files from Deezer-sourced ones. Deezer ALWAYS
+    wins on collision: a Soulseek-sourced file is re-fetched and overwritten on
+    a later Deezer pass, which then flips that position's source back to
+    'deezer' via this same function (and status stays "downloaded").
+    """
+    import json as _json
+    path = out_dir / "playlist.meta.json"
+    if not path.is_file():
+        return
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    for tr in data.get("tracks", []):
+        pos = tr.get("position")
+        if pos in sources:
+            tr["source"] = sources[pos]
+            tr["status"] = "downloaded"
+    path.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")

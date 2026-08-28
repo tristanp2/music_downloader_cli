@@ -36,7 +36,8 @@ class DownloadJob:
     id: str
     url: str
     user: str
-    playlist_name: str = ""                              
+    playlist_name: str = ""
+    source: str = "deezer"   # "deezer" | "soulseek" -- which source this job pulls from 
     status: str = "queued"                  # queued|running|done|error
     log: list[str] = field(default_factory=list)
     result: DispatchResult = field(default_factory=DispatchResult) 
