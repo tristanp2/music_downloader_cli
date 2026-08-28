@@ -290,6 +290,87 @@ _SONGJOB_RE = re.compile(r"SongJob:\s*([^:]+):\s*(.+)")
 _TYPE_START = {"searching", "downloading"}
 
 
+# --- concise log formatter -------------------------------------------------
+# sockseek's own stdout is noisy: per-source "download attempt failed" lines
+# (one per failed peer), full absolute peer paths, ".incomplete" Output lines,
+# and internal [NNN] job-id prefixes. The formatter below rewrites the lines we
+# care about into the project's "[soulseek] ..." style and drops the
+# pure-noise lines. Anything it can't recognize is returned unchanged (printed
+# plain) so we never silently swallow an unknown message.
+_FMT_SONGJOB_RE = re.compile(r"^\[[^\]]*\]\s*SongJob:\s*(\w+)(?:\s*\[([^\]]*)\])?:\s*(.+)$")
+_FMT_ATTEMPT_FAIL_RE = re.compile(r"^\[warn\]\s*\[jobs\]\s*\[\d+\]\s*SongJob:\s*download attempt failed:")
+_FMT_EXTRACT_RE = re.compile(r"^\[[^\]]*\]\s*ExtractJob:")
+_FMT_JOBLIST_RE = re.compile(r"^\[[^\]]*\]\s*Job List:")
+_FMT_OUTPUT_RE = re.compile(r"^\s*Output:")
+# Peer timeout: "StaleDownloadException: Download attempt became stale after
+# <ms>ms without peer transfer activity: <peer>/<path>" (or "Error: Download
+# attempt became stale ..."). The <peer> is the FIRST path segment.
+_FMT_STALE_RE = re.compile(
+    r"(?:StaleDownloadException|Error):\s*Download attempt became stale after (\d+)ms "
+    r"without peer transfer activity:\s*(.+)",
+    re.IGNORECASE,
+)
+
+
+def _format_soulseek_line(raw: str) -> str | None:
+    """Return a concise `[soulseek] ...` line for a raw sockseek stdout line,
+    None to drop it (noise), or the original line if it can't be parsed.
+
+    Concise verb mapping for the per-track SongJob lines:
+      searching   -> [soulseek] search: <name>
+      downloading -> [soulseek] download: <name>   (one line per peer attempt)
+      succeeded   -> [soulseek] got: <name>
+      failed [..] -> [soulseek] miss [..]: <name>
+    Dropped (pure noise): Output: lines, ExtractJob:, Job List:, and the
+    per-source "download attempt failed" wrapper (the StaleDownloadException
+    below already tells us the peer timed out).
+    Peer timeout:  StaleDownloadException / Error "stale after <ms>ms ..." ->
+      [soulseek] timeout (<ms>ms): <peer>
+    Anything unrecognized passes through plain so we never swallow an unknown.
+    """
+    line = raw.strip()
+    if not line:
+        return None
+    if line.startswith("[soulseek]"):
+        return line  # already ours
+    if _FMT_OUTPUT_RE.match(line):
+        return None
+    if _FMT_EXTRACT_RE.match(line):
+        return None
+    if _FMT_JOBLIST_RE.match(line):
+        return None
+    if _FMT_ATTEMPT_FAIL_RE.match(line):
+        # transient per-source failure; the StaleDownloadException timeout line
+        # below already reports the peer stall, so we drop this wrapper.
+        return None
+    sm = _FMT_STALE_RE.search(line)
+    if sm:
+        ms = sm.group(1)
+        # The peer is the FIRST path segment of the file path sockseek reports
+        # (e.g. "m1sae1/...", "DJ-Promo/AUDIO1/...", or "peer/../rest").
+        peer = sm.group(2).split("/", 1)[0].split("\\", 1)[0]
+        return f"[soulseek] timeout ({ms}ms): {peer}"
+    m = _FMT_SONGJOB_RE.match(line)
+    if m:
+        typ, reason, rest = m.group(1), m.group(2), m.group(3).strip()
+        # rest is "<name>" or "<name>: <peer>\..\<path>" -- keep only the name.
+        name = rest.split(": ", 1)[0] if ": " in rest else rest
+        if typ == "searching":
+            return f"[soulseek] search: {name}"
+        if typ == "downloading":
+            return f"[soulseek] download: {name}"
+        if typ == "succeeded":
+            return f"[soulseek] got: {name}"
+        if typ == "failed":
+            tag = f" [{reason}]" if reason else ""
+            return f"[soulseek] miss{tag}: {name}"
+        return f"[soulseek] {typ}: {name}"
+    return line  # unrecognized -> print plain
+
+
+
+
+
 def _parse_songjob_line(line: str, position_by_title: dict[str, int]):
     """Return ("start"|"done", pos) for a parseable sockseek song line, else None.
 
@@ -435,7 +516,10 @@ def run_soulseek_sweep(folder: str, user: str, work_dir: Path, missed: list[dict
                 line = line.rstrip("\n")
                 if not line.strip():
                     continue
-                report(line)  # -> job log + server log (report() calls log.info)
+                # Rewrite noisy sockseek lines into the concise [soulseek] style
+                # (drops peer paths / .incomplete noise; unrecognized lines pass
+                # through plain). -> job log + server log (report() calls log.info)
+                report(_format_soulseek_line(line) or line)
                 if on_event:
                     parsed = _parse_songjob_line(line, position_by_title)
                     if parsed is not None:

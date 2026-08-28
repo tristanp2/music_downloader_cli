@@ -521,9 +521,6 @@ def _run_soulseek_job_threaded(job_id: str) -> None:
             _SOULSEEK_INFLIGHT.pop(job_id, None)
 
 
-
-
-
 def _run_soulseek_job(job_id: str) -> None:
     """Run one Soulseek sweep to completion.
 
