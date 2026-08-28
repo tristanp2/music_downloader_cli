@@ -33,7 +33,6 @@ import os
 import sys
 import time
 import threading
-import uuid
 import atexit
 import json
 import asyncio
@@ -309,6 +308,12 @@ JOB_QUEUE: deque[str] = deque()
 JOB_QUEUE_LOCK = threading.Lock()
 _drain_thread: threading.Thread | None = None
 
+# Monotonic job id source. Stored as a string-of-int on DownloadJob.id so the
+# wire shape (REST + SSE), the frontend jobCards Map key, and the DOM
+# data-job attribute all stay consistent without any frontend edit. Incremented
+# under JOBS_LOCK inside _start_job so concurrent enqueues never collide.
+NEXT_JOB_ID: int = 0
+
 
 def _ensure_drain_thread() -> None:
     """Start the single sequential worker thread if it isn't already running."""
@@ -460,7 +465,9 @@ def _start_job(url: str, user: str, name: str = "") -> str | None:
             j = JOBS.get(job_id)
             if j is not None and j.user == user and j.url == url:
                 return None
-        job_id = uuid.uuid4().hex[:12]
+        global NEXT_JOB_ID
+        NEXT_JOB_ID += 1
+        job_id = str(NEXT_JOB_ID)
         JOBS[job_id] = DownloadJob(
             id=job_id,
             url=url,
