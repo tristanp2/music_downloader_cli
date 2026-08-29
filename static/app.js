@@ -353,6 +353,9 @@ class JobCard
   urlEl;
   /** @type {HTMLElement} */
   listEl;
+  /** @type {Date | null} */
+  finishedAt;
+
   /**
    * @param {JobInit} j
    */
@@ -488,6 +491,11 @@ class JobCard
     else 
     {
       this.paintChips();
+    }
+
+    if(job.finished_at)
+    {
+      this.finishedAt = new Date(job.finished_at);
     }
   }
 
@@ -656,19 +664,26 @@ function reorderJobCards()
 
 function trimJobCards() 
 {
-  const MAX_CARDS = 30;
-  // Trim across BOTH tab containers (Deezer + Soulseek) so the combined set of
-  // job cards never grows unbounded.
-  const total = jobCards.size;
-  if (total <= MAX_CARDS) return;
-  const overflow = total - MAX_CARDS;
-  let removed = 0;
-  for (const [id, card] of jobCards) 
+  const TRIM_DONE_AGE_MS = 30 * 60 * 1000; // 30 minutes
+  const finished = [];
+  for (const [id, card] of jobCards)
   {
-    if (removed >= overflow) break;
-    card.remove();
-    jobCards.delete(id);
-    removed++;
+    const el = card.el;
+    if (el.classList.contains("done") || el.classList.contains("error"))
+    {
+      finished.push({ id: id, card: card });
+    }
+  }
+
+  const now = Date.now();
+  for(const finishedCard of finished ){
+    const finishedAt = finishedCard.card.finishedAt;
+    const at = finishedAt? finishedAt.getTime() : now;
+    if (now - at > TRIM_DONE_AGE_MS)
+    {
+      finishedCard.card.remove();
+      jobCards.delete(finishedCard.id);
+    }
   }
 }
 
