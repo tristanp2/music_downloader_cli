@@ -117,6 +117,25 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
     folder = safe_folder_name(pl_name) or pid
     out_dir = work_dir / folder
 
+    # Load prior `source` provenance from an existing playlist.meta.json (if any)
+    # so a re-download doesn't clobber Soulseek-sourced tracks back to "deezer".
+    # The Deezer pass runs BEFORE the Soulseek sweep, so Soulseek files aren't on
+    # disk yet and the skip-gate can't preserve them by filename -- only this meta
+    # field carries their provenance. We re-apply each prior source for tracks we
+    # don't explicitly (re)fetch from Deezer below; see write_meta(sources=...).
+    prior_sources: dict[int, str] = {}
+    try:
+        import json as _json
+        _mp = out_dir / "playlist.meta.json"
+        if _mp.is_file():
+            _data = _json.loads(_mp.read_text(encoding="utf-8"))
+            for _tr in _data.get("tracks", []):
+                _p = _tr.get("position")
+                if _p is not None and _tr.get("source"):
+                    prior_sources[_p] = _tr["source"]
+    except Exception:
+        prior_sources = {}
+
     # emit full track list upfront so the UI can render all rows immediately
     event({
         "type": JobEventType.TRACKS,
@@ -135,6 +154,11 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
     downloaded = 0
     failed = 0
     statuses = []
+    # Per-position provenance for this pass. Preserves prior Soulseek-sourced
+    # tracks on re-download (see prior_sources above); only freshly Deezer-fetched
+    # tracks are tagged "deezer". Passed to write_meta so the regenerated JSON
+    # doesn't rewrite Soulseek tracks as Deezer.
+    sources: dict[int, str] = {}
 
     for i, t in enumerate(tracks, 1):
         # Search Deezer using only the FIRST listed artist. Spotify often lists
@@ -166,8 +190,11 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
             # file on every sync. If the file is here and recognized, it's done.
             report(f"[{pos}/{total}] {display[:60]}")
             report(f"    [skip] already present: {existing.name}")
-            event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.SKIPPED, "pct": 100})
-            statuses.append("downloaded")
+            event({'type': JobEventType.DONE, 'pos': pos, 'status': DownloadStatus.SKIPPED, 'pct': 100})
+            statuses.append('downloaded')
+            # File already on disk: keep its prior provenance (soulseek stays
+            # soulseek, deezer stays deezer) -- don't flip it on a re-download.
+            sources[pos] = prior_sources.get(pos, 'deezer')
             skipped += 1
             continue
         # clean up any partial/interrupted leftover for this track BEFORE
@@ -205,15 +232,19 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
                     report(f"    [deezer] fallback matched: {matched_artist} - {matched_title}")
         if not matched_track:
             report("    [deezer] no match")
-            event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.MISSED, "pct": 0})
+            event({'type': JobEventType.DONE, 'pos': pos, 'status': DownloadStatus.MISSED, 'pct': 0})
             missed.append({"name": t.name, "artists": t.artists, "position": pos})
             statuses.append("missed")
+            # Not fetched this pass: keep prior provenance (don't flip a prior
+            # soulseek track to deezer just because Deezer can't find it now).
+            sources[pos] = prior_sources.get(pos, "deezer")
             continue
         dz_url = matched_track.get("link")
         if not dz_url:
             missed.append({"name": t.name, "artists": t.artists, "position": pos})
-            event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.MISSED, "pct": 0})
+            event({'type': JobEventType.DONE, 'pos': pos, 'status': DownloadStatus.MISSED, 'pct': 0})
             statuses.append("missed")
+            sources[pos] = prior_sources.get(pos, "deezer")
             continue
 
         # download
@@ -225,18 +256,24 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
         if flac:
             final = tag_and_rename(flac, pos, total)
             report(f"    [deezer] downloaded -> {final.name}")
-            event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.DOWNLOADED, "pct": 100})
-            statuses.append("downloaded")
+            event({'type': JobEventType.DONE, 'pos': pos, 'status': DownloadStatus.DOWNLOADED, 'pct': 100})
+            statuses.append('downloaded')
+            # Freshly fetched from Deezer this pass -> provenance is deezer.
+            sources[pos] = 'deezer'
             downloaded += 1
         else:
             report("    [deezer] download failed")
-            event({"type": JobEventType.DONE, "pos": pos, "status": DownloadStatus.FAILED, "pct": 0})
+            event({'type': JobEventType.DONE, 'pos': pos, 'status': DownloadStatus.FAILED, 'pct': 0})
             missed.append({"name": t.name, "artists": t.artists, "position": pos})
             statuses.append("missed")
+            # Download failed: not (re)landed this pass, so keep prior provenance.
+            sources[pos] = prior_sources.get(pos, "deezer")
             failed += 1
 
     try:
-        meta_path = write_meta(out_dir, url, pid, pl_name, tracks, statuses)
+        # Pass sources so the regenerated meta keeps prior Soulseek provenance
+        # (a re-download must NOT rewrite soulseek tracks as deezer).
+        meta_path = write_meta(out_dir, url, pid, pl_name, tracks, statuses, sources=sources)
         report(f"[*] wrote {meta_path.name}")
     except Exception as e:
         report(f"[warn] could not write playlist.meta.json: {e}")

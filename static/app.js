@@ -631,6 +631,29 @@ function ensureJobCard(j)
 // safe to drop. Called from both the SSE creation path and the poll reconcile,
 // because the poll only runs on load + user actions and is NOT on a timer — so
 // over a long idle stretch, SSE-created cards would otherwise never be trimmed.
+// Re-append every card in the registry to its container in job-id
+// (creation-sequence) order. Job ids are monotonic strings-of-int (app.py
+// NEXT_JOB_ID), so sorting ascending puts the oldest first. appendChild moves an
+// existing node, so this re-orders in place without recreating cards or losing
+// their live state. Operates on the jobCards registry directly (not a passed-in
+// list) so BOTH the poll path (syncJobs, which has the full list) and the SSE
+// job_created handler (which only has one job id) can call it with no extra
+// plumbing -- the registry already holds every card's id/source/el.
+function reorderJobCards() 
+{
+  const ordered = Array.from(jobCards.values()).sort(function (a, b) 
+  {
+    return String(a.id).localeCompare(String(b.id), undefined, { numeric: true });
+  });
+  for (let i = 0; i < ordered.length; i++) 
+  {
+    const card = ordered[i];
+    const containerId = card.source === "soulseek" ? "#fallback-jobs" : "#jobs";
+    const container = $(containerId) || $("#jobs");
+    if (container) container.appendChild(card.el);
+  }
+}
+
 function trimJobCards() 
 {
   const MAX_CARDS = 30;
@@ -673,6 +696,15 @@ function syncJobs(jobs)
       jobCards.delete(id);
     }
   }
+
+  // Pin the visible order to a stable key (job id = creation sequence), so the
+  // list is NEVER event-timing-dependent. Old done jobs sit on top; newly
+  // enqueued (queued/running) jobs stay at the bottom in the order they were
+  // created. Without this, cards land wherever their SSE/job_created event
+  // arrived relative to refreshJobs(), which is the "queued jumps to the top"
+  // inconsistency. appendChild moves an existing node to the end, so replaying
+  // the cards in sorted order re-orders in place.
+  reorderJobCards();
 
   // Keep the rendered queue bounded (see trimJobCards for why this must also
   // run on the SSE creation path, not just here).
@@ -1206,6 +1238,12 @@ async function startUpdate(url)
     // Trim here too: SSE-created cards are the unbounded-growth path (the /jobs
     // poll only runs on load + user actions, never on a timer).
     trimJobCards();
+    // Re-sort live: a freshly SSE-created card lands at the DOM bottom wherever
+    // its event fired, so without this the queue stays scrambled mid-sync (see
+    // the 1 2 10 11 12 .. 3 4 .. order in snapshot.html). The poll path
+    // (syncJobs) reorders too, but during a quiet sync no poll fires, so the
+    // live stream is the only thing keeping order correct.
+    reorderJobCards();
   });
 
   // Per-track progress is relayed by the backend for EVERY job; apply to its card.
@@ -1227,6 +1265,8 @@ async function startUpdate(url)
   {
     const event = JSON.parse(e.data);
     ensureJobCard(event.job).renderSnapshot(event.job);
+    trimJobCards();
+    reorderJobCards();
     refreshPlaylists();
   });
 
@@ -1235,7 +1275,17 @@ async function startUpdate(url)
   eventSource.addEventListener("job_started", function(e) 
   {
     const event = JSON.parse(e.data);
-    if (event.job) ensureJobCard(event.job).renderSnapshot(event.job);
+    if (event.job) 
+    {
+      ensureJobCard(event.job).renderSnapshot(event.job);
+      // Re-sort here too: if this card was created out of birth order (its
+      // job_created not yet applied, or jobs enqueued progressively), it would
+      // otherwise sit wherever it landed -- the "running job at the bottom"
+      // symptom. Re-sorting on every lifecycle flip (created/started/done)
+      // keeps the queue in id order at all times; the per-track events paint
+      // in place and don't move the node, so they don't need this.
+      reorderJobCards();
+    }
   });
 
   eventSource.onopen = function() 

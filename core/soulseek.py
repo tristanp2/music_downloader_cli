@@ -10,7 +10,7 @@ Design notes (see SOULSEEK_FALLBACK_PLAN.md):
   * Soulseek is a P2P FILE download -- NOT real-time. Speed/availability is
     peer-driven: a track can be fast, slow, or simply absent. That unreliability
     is exactly why the Deezer pass runs first and the Soulseek sweep is kicked
-    off only for the `missed` tracks, in a SEPARATE parallel worker.
+    off only for the `missed` tracks, in a SINGLE merged sockseek instance per user (one login + one listen port shared by every playlist in that drain).
   * We feed sockseek a CSV of (title, artist) built from the playlist.meta.json
     we already parsed. We do NOT use sockseek's native `--input-type spotify`
     mode -- that would require Spotify dev-app credentials for no gain, since
@@ -160,16 +160,6 @@ def build_missed_csv(missed: list[dict], csv_path: Path) -> None:
 # staging -> layout
 # ---------------------------------------------------------------------------
 
-def _match_csv_row_to_file(row_title: str, row_artist: str, candidate: Path) -> bool:
-    """Loose match of a landed file to its CSV row by title (artist is often
-    truncated/normalised by the peer, so we match on the title core only)."""
-    want_title = _normalize(row_title)
-    if not want_title:
-        return False
-    _, file_title = _core_artist_title(candidate.stem)
-    return want_title == _normalize(file_title)
-
-
 def _resolve_position_by_containment(norm_file_title: str, position_by_title: dict[str, int]) -> int | None:
     """Fallback position match when an exact normalized-title match fails.
 
@@ -191,64 +181,13 @@ def _resolve_position_by_containment(norm_file_title: str, position_by_title: di
     return None
 
 
-def _stage_into_layout(source_dir: Path, out_dir: Path, position_by_title: dict[str, int],
-                       total: int) -> list[tuple[int, Path]]:
-    """Move + re-tag every COMPLETE audio file from sockseek's output dir into
-    the downloader's bare `Artist - Title.flac` layout, setting TRACKNUMBER
-    (from the meta position) and ALBUM (so the sync completeness gate treats it
-    as a finished file, not a partial -- see P35).
-
-    Returns [(position, final_path), ...] for the files that landed and passed
-    the lossless gate. Files that fail the gate are left in source_dir (so a
-    re-run can retry) and NOT reported as landed.
-    """
-    landed: list[tuple[int, Path]] = []
-    # sockseek nests files under <output-dir>/<jobname>/<artist>/... so we must
-    # walk recursively -- a flat glob would miss everything (the original bug:
-    # the sweep reported 0 landed because the file sat one folder deeper).
-    for audio_file in (*source_dir.rglob("*.flac"), *source_dir.rglob("*.mp3")):
-        if not _is_complete_audio(audio_file):
-            continue
-        if not _is_real_lossless(audio_file):
-            # Fake FLAC (padded MP3): leave in place, don't import. Stays missed.
-            continue
-        _, file_title = _core_artist_title(audio_file.stem)
-        norm_title = _normalize(file_title)
-        position = position_by_title.get(norm_title)
-        if position is None:
-            # Exact title match failed (e.g. a redundant artist prefix in the
-            # landed filename like "Jafu - Jafu - In The Back" vs meta "In The
-            # Back"). Fall back to containment so the file still maps to its real
-            # playlist position instead of being dropped to 0 (mis-tagged 01).
-            position = _resolve_position_by_containment(norm_title, position_by_title)
-        if position is None:
-            # Still no mapping -> put it in the folder with no TRACKNUMBER.
-            # Better partially present than missing.
-            position = 0
-        artist_part, _ = _core_artist_title(audio_file.stem)
-        target_name = f"{audio_file.stem}{audio_file.suffix}"
-        target = out_dir / target_name
-        try:
-            # os.replace overwrites atomically on every platform (Path.rename
-            # raises FileExistsError on Windows when the target already exists).
-            # A re-run of the sweep legitimately replaces a prior Soulseek file.
-            os.replace(audio_file, target)
-        except Exception as e:
-            if log:
-                log.warning("[soulseek] could not move %s -> %s: %s", audio_file.name, target, e)
-            continue
-        _tag_for_layout(target, position, total)
-        if position:
-            landed.append((position, target))
-    return landed
-
-
 def _tag_for_layout(path: Path, position: int, total: int) -> None:
     """Set TRACKNUMBER (crate ordering) + ALBUM (completeness) on the landed
     file. ALBUM is required so the sync completeness gate (_is_complete_audio)
     doesn't treat this as a partial and purge it. We can't know the real album
     from Soulseek, so we stamp a stable sentinel; the exporter only needs a
-    non-empty ALBUM to render the crate."""
+    non-empty ALBUM to render the crate.
+    """
     try:
         if path.suffix.lower() == ".mp3":
             from mutagen.easyid3 import EasyID3
@@ -268,14 +207,10 @@ def _tag_for_layout(path: Path, position: int, total: int) -> None:
         pass  # tag best-effort; the file is already in place
 
 
-# ---------------------------------------------------------------------------
-# sweep
-# ---------------------------------------------------------------------------
-
 # Max ms a Soulseek download can go with no transfer progress before sockseek
 # abandons that peer and tries the next one (its own "stale download" guard).
 # Default in sockseek is 30000 -- that's a long stall on a dead peer, so we cut
-# it to 10s: a peer that hasn't moved a byte in 10s is almost certainly stalled
+# it to 5000ms: a peer that hasn't moved a byte in 5s is almost certainly stalled
 # and sockseek should move on to the next candidate. Tunable here.
 SOULSEEK_MAX_STALE_MS = 5000
 
@@ -287,8 +222,6 @@ SOULSEEK_MAX_STALE_MS = 5000
 # We parse the "Artist - Title" out of the segment after "SongJob: <type>: " and
 # match its normalized title against position_by_title to find the playlist pos.
 _SONGJOB_RE = re.compile(r"SongJob:\s*([^:]+):\s*(.+)")
-_TYPE_START = {"searching", "downloading"}
-
 
 # --- concise log formatter -------------------------------------------------
 # sockseek's own stdout is noisy: per-source "download attempt failed" lines
@@ -371,12 +304,14 @@ def _format_soulseek_line(raw: str) -> str | None:
 
 
 
-def _parse_songjob_line(line: str, position_by_title: dict[str, int]):
-    """Return ("start"|"done", pos) for a parseable sockseek song line, else None.
+def _parse_songjob_line(line: str, title_to_specs: dict[str, list[tuple[int, int]]]):
+    """Return (kind, matches, ok) for a parseable sockseek song line, else None.
 
-    Best-effort: matched on the normalized track title, so a title that differs
-    from the Deezer name (or a multi-artist " - " in the title) may not match and
-    is silently skipped -- the end-of-sweep batch still resolves every track.
+    title_to_specs: normalized title -> [(spec_index, pos), ...] across the
+    merged drain. A title may belong to several playlists (different positions),
+    so the caller fans the event out to every owning spec. Best-effort: a title
+    not in the map (or a multi-artist " - " mismatch) is silently skipped -- the
+    end-of-drain batch still resolves every track against landed_positions.
     """
     m = _SONGJOB_RE.search(line)
     if not m:
@@ -386,15 +321,18 @@ def _parse_songjob_line(line: str, position_by_title: dict[str, int]):
     name = rest.rsplit(": ", 1)[0] if ": " in rest else rest
     # name is "Artist - Title"; take the title portion after the first " - ".
     title = name.split(" - ", 1)[1] if " - " in name else name
-    pos = position_by_title.get(_normalize(title))
-    if pos is None:
+    matches = title_to_specs.get(_normalize(title))
+    if not matches:
         return None
-    if typ in _TYPE_START:
-        return ("start", pos, True)
+    # `searching` is informational -- it goes to the server log (formatted) but
+    # emits no live event (the row shouldn't flip to DOWNLOADING until a peer is
+    # actually being fetched). `downloading` -> start; `succeeded`/`failed` -> done.
+    if typ == "downloading":
+        return ("start", matches, True)
     if typ.startswith("succeeded"):
-        return ("done", pos, True)
+        return ("done", matches, True)
     if typ.startswith("failed"):
-        return ("done", pos, False)
+        return ("done", matches, False)
     return None
 
 
@@ -410,153 +348,171 @@ def _rm_sweep_dir(sweep_dir: Path) -> None:
         pass
 
 
-def run_soulseek_sweep(folder: str, user: str, work_dir: Path, missed: list[dict],
-                       total: int, on_progress=None, on_event=None) -> dict:
-    """Run a Soulseek sweep for one playlist's Deezer-missed tracks.
+def run_soulseek_drain(specs: list[dict], work_dir: Path) -> dict:
+    """Run ONE sockseek process for all `specs` (a single merged drain).
 
-    Parameters
-    ----------
-    folder : str
-        The safe playlist folder name (same as the Deezer pass used).
-    user : str
-        Owning user (drives WORK_DIR_BASE/<user>/<folder>).
-    work_dir : Path
-        The Deezer pass's work_dir (WORK_DIR_BASE/<user>) -- the playlist folder
-        is work_dir / folder.
-    missed : list[dict]
-        [{name, artists}, ...] for the Deezer-missed tracks.
-    total : int
-        Track count of the playlist (for TRACKNUMBER zero-padding).
-    on_progress : callable(msg) | None
-        Optional text hook (wired to the job log + server log in app.py). Each
-        sockseek stdout line is reported here, so the full trace lands in both.
-    on_event : callable(kind, pos, ok) | None
-        Optional live-progress hook. For each sockseek line we can parse, calls
-        on_event("start", pos, True) on searching/downloading and
-        on_event("done", pos, ok) on succeeded (ok=True) / failed (ok=False) --
-        so the frontend can reflect Soulseek progress in the job card as it
-        happens (best-effort; title-matched, not byte-precise).
+    This replaces the old per-playlist subprocess model. Launching one sockseek
+    per playlist caused N simultaneous logins that all tried to bind the same
+    listen port (49998) and stomped on each other -- only one would win, the
+    rest died with "Failed to start listening". A single merged instance logs in
+    once, binds the port once, and downloads every playlist's misses in one
+    search session (also faster). `user` is irrelevant here: it's only an
+    output-path prefix handled by each spec's own out_dir, and the single
+    sockseek process always uses the shared tools/sockseek.conf account. Each
+    spec still gets its own job card + live events; the shared stream is fanned
+    out to the owning spec(s) for every track (a track wanted by several
+    playlists routes to all of them).
 
-    Returns a result dict: {ok, downloaded, missed, error, landed_positions, sweep_dir}.
+    Each spec dict:
+        folder, user, out_dir (Path), missed (list[dict]), total (int),
+        position_by_title (norm_title -> pos), on_progress(msg),
+        on_event(kind, pos, ok)
+
+    Returns {spec_index: {"ok", "downloaded", "missed", "landed_positions",
+    "error"}, ...}.
     """
-    def report(msg):
-        if log:
-            log.info(msg)
-        if on_progress:
-            on_progress(msg)
-        else:
-            print(msg)
+    results: dict[int, dict] = {}
+    if not specs:
+        return results
 
-    out_dir = work_dir / folder
-    out_dir.mkdir(parents=True, exist_ok=True)
-    # Serialize cross-source disk work on THIS playlist with the Deezer drain.
-    with playlist_lock(out_dir):
-        exe = _sockseek_exe()
-        if exe is None:
-            return {"ok": False, "error": "sockseek.exe not found in tools/",
-                    "downloaded": 0, "missed": len(missed)}
-        conf = _sockseek_conf()
-        if not conf.is_file():
-            return {"ok": False, "error": "sockseek.conf not found in tools/",
-                    "downloaded": 0, "missed": len(missed)}
-
-        # Build the position-by-title map for staging (title normalized -> pos).
-        position_by_title = {}
-        for mt in missed:
+    # Build one merged CSV (deduped by name+artists) + the title->specs map.
+    merged: dict[tuple, dict] = {}
+    title_to_specs: dict[str, list[tuple[int, int]]] = {}
+    for idx, spec in enumerate(specs):
+        for mt in spec["missed"]:
+            key = (mt.get("name") or "", tuple(mt.get("artists") or []))
+            merged.setdefault(key, mt)
             norm = _normalize(mt.get("name") or "")
             if norm:
-                position_by_title[norm] = mt.get("position") or 0
+                title_to_specs.setdefault(norm, []).append(
+                    (idx, mt.get("position") or 0))
 
-        # sockseek writes to ITS OWN output dir (from sockseek.conf). We stage
-        # into a per-run subfolder so we don't accidentally re-import files from
-        # a previous run, then move only what this run produced.
-        sweep_dir = out_dir / ".soulseek_sweep"
-        # Start clean: a stale sweep dir from a previous run (nested
-        # .sockseek-staging/<hash>/ folders + .incomplete files) survived the old
-        # cleanup and caused issues on reruns. Always wipe whatever is there first.
-        if sweep_dir.exists():
-            _rm_sweep_dir(sweep_dir)
-        sweep_dir.mkdir(parents=True, exist_ok=True)
-        csv_path = sweep_dir / "missed.csv"
-        build_missed_csv(missed, csv_path)
+    # Shared staging dir for this drain (under the user's work_dir).
+    sweep_dir = work_dir / ".soulseek_sweep"
+    if sweep_dir.exists():
+        _rm_sweep_dir(sweep_dir)
+    sweep_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = sweep_dir / "missed.csv"
+    build_missed_csv(list(merged.values()), csv_path)
 
-        cmd = [
-            str(exe),
-            "--config", str(conf),
-            "--input-type", "csv",
-            "--pref-format", "flac,wav",
-            # Bare "Artist - Title" filename (no artist/album subfolders) so the
-            # downloader's existing Artist - Title parser + TRACKNUMBER logic
-            # line up. Falls back to the original filename if untagged.
-            "--name-format", "{artist( - )title|filename}",
-            # Abandon a stalled peer faster than sockseek's 30s default (see
-            # SOULSEEK_MAX_STALE_MS). A dead peer gets dropped at 10s and sockseek
-            # retries the next candidate instead of hanging the whole sweep.
-            "--max-stale-time", str(SOULSEEK_MAX_STALE_MS),
-            # Point sockseek's output at this run's staging dir. The long flag
-            # is --output-dir (NOT --output -- that's an unknown arg and the
-            # sweep exits 2). _stage_into_layout then moves landed files out of
-            # sweep_dir into the playlist folder.
-            "--output-dir", str(sweep_dir),
-            str(csv_path),
-        ]
-        report(f"[soulseek] sweeping {len(missed)} missed tracks for '{folder}'")
-        # Stream sockseek's output line-by-line into the job log so the per-track
-        # search/succeed/fail activity is visible (previously discarded on success,
-        # because subprocess.run(capture_output=True) threw stdout away). Merge
-        # stderr into stdout; report each non-blank line as it arrives.
+    # Announce each playlist in the server log + its own job log.
+    for spec in specs:
+        msg = f"[soulseek] sweeping {len(spec['missed'])} missed tracks for '{spec['folder']}'"
+        if log:
+            log.info(msg)
+        spec["on_progress"](msg)
+
+    exe = _sockseek_exe()
+    if exe is None:
+        return {i: {"ok": False, "error": "sockseek.exe not found in tools/",
+                    "downloaded": 0, "missed": len(s["missed"]),
+                    "landed_positions": []} for i, s in enumerate(specs)}
+    conf = _sockseek_conf()
+    if not conf.is_file():
+        return {i: {"ok": False, "error": "sockseek.conf not found in tools/",
+                    "downloaded": 0, "missed": len(s["missed"]),
+                    "landed_positions": []} for i, s in enumerate(specs)}
+
+    cmd = [
+        str(exe),
+        "--config", str(conf),
+        "--input-type", "csv",
+        "--pref-format", "flac,wav",
+        # Bare "Artist - Title" filename (no artist/album subfolders) so the
+        # downloader's existing Artist - Title parser + TRACKNUMBER logic
+        # line up. Falls back to the original filename if untagged.
+        "--name-format", "{artist( - )title|filename}",
+        # Abandon a stalled peer faster than sockseek's 30s default (see
+        # SOULSEEK_MAX_STALE_MS). A dead peer gets dropped and sockseek retries
+        # the next candidate instead of hanging the whole sweep.
+        "--max-stale-time", str(SOULSEEK_MAX_STALE_MS),
+        # Point sockseek's output at this drain's staging dir.
+        "--output-dir", str(sweep_dir),
+        str(csv_path),
+    ]
+
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            raw = raw.rstrip("\n")
+            if not raw.strip():
+                continue
+            fmt = _format_soulseek_line(raw)
+            if fmt is None:
+                continue
+            parsed = _parse_songjob_line(raw, title_to_specs)
+            matched = parsed[1] if parsed else []
+            # Server log gets the concise line once; each owning job gets it too.
+            if log:
+                log.info(fmt)
+            for (sidx, _) in matched:
+                specs[sidx]["on_progress"](fmt)
+            if parsed is not None:
+                kind, matches, ok = parsed
+                for (sidx, pos) in matches:
+                    specs[sidx]["on_event"](kind, pos, ok)
+        proc.wait(timeout=3600)
+    except subprocess.TimeoutExpired:
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        if log:
+            log.warning("[soulseek] drain timed out (1h) -- partial results kept")
         proc = None
-        try:
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
-            )
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                line = line.rstrip("\n")
-                if not line.strip():
-                    continue
-                # Rewrite noisy sockseek lines into the concise [soulseek] style
-                # (drops peer paths / .incomplete noise; unrecognized lines pass
-                # through plain). -> job log + server log (report() calls log.info)
-                report(_format_soulseek_line(line) or line)
-                if on_event:
-                    parsed = _parse_songjob_line(line, position_by_title)
-                    if parsed is not None:
-                        kind, pos, ok = parsed
-                        on_event(kind, pos, ok)
-            proc.wait(timeout=3600)
-        except subprocess.TimeoutExpired:
-            if proc is not None:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-            report("[soulseek] sweep timed out (1h) -- partial results kept")
-            proc = None
-        except Exception as e:
-            result = {"ok": False, "error": f"sockseek failed: {e}",
-                      "downloaded": 0, "missed": len(missed),
-                      "landed_positions": [], "sweep_dir": str(sweep_dir)}
-        else:
-            if proc is not None and proc.returncode != 0:
-                report(f"[soulseek] sockseek exited {proc.returncode}")
+    except Exception as e:
+        if log:
+            log.error("[soulseek] drain failed: %s", e)
+        proc = None
 
-            landed = _stage_into_layout(sweep_dir, out_dir, position_by_title, total)
-            landed_positions = {pos for pos, _ in landed}
-            # Flip provenance for landed tracks so Deezer can override later.
-            if landed_positions:
-                update_track_sources(out_dir, {pos: "soulseek" for pos in landed_positions})
-            result = {
-                "ok": True,
-                "downloaded": len(landed),
-                "missed": len(missed) - len(landed),
-                "landed_positions": sorted(landed_positions),
-                "sweep_dir": str(sweep_dir),
-            }
-        finally:
-            # Always remove the per-run staging dir so a stale nested
-            # .sockseek-staging/<hash>/ or leftover .incomplete can't poison the
-            # next rerun. Landed files were already moved into out_dir.
-            _rm_sweep_dir(sweep_dir)
-        return result
+    # Stage: copy each landed file into every playlist that wanted it, tagged
+    # with THAT playlist's TRACKNUMBER. A single physical download can satisfy
+    # several playlists (different positions -> different copies).
+    try:
+        landed_files = [
+            f for f in (*sweep_dir.rglob("*.flac"), *sweep_dir.rglob("*.mp3"))
+            if _is_complete_audio(f) and _is_real_lossless(f)
+        ]
+    except Exception:
+        landed_files = []
+    for idx, spec in enumerate(specs):
+        out_dir = spec["out_dir"]
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pbt = spec["position_by_title"]
+        total = spec["total"]
+        landed_positions: set[int] = set()
+        for f in landed_files:
+            _, file_title = _core_artist_title(f.stem)
+            norm = _normalize(file_title)
+            pos = pbt.get(norm)
+            if pos is None:
+                pos = _resolve_position_by_containment(norm, pbt)
+            if pos is None:
+                continue
+            target = out_dir / f"{f.stem}{f.suffix}"
+            try:
+                shutil.copy2(f, target)
+            except Exception as e:
+                if log:
+                    log.warning("[soulseek] could not copy %s -> %s: %s", f.name, target, e)
+                continue
+            _tag_for_layout(target, pos, total)
+            landed_positions.add(pos)
+        if landed_positions:
+            update_track_sources(out_dir, {p: "soulseek" for p in landed_positions})
+        results[idx] = {
+            "ok": True,
+            "downloaded": len(landed_positions),
+            "missed": len(spec["missed"]) - len(landed_positions),
+            "landed_positions": sorted(landed_positions),
+        }
+    # Always wipe the staging dir so a stale nested .sockseek-staging/<hash>/ or
+    # leftover .incomplete can't poison the next rerun.
+    _rm_sweep_dir(sweep_dir)
+    return results
