@@ -36,6 +36,44 @@ def _core_artist_title(stem: str) -> tuple[str, str]:
     return "", stem
 
 
+# Windows-forbidden filename chars (and quote, which Explorer also rejects).
+_ILLEGAL_FILENAME = re.compile(r'[:?*/\\<>|"]')
+
+
+def _sanitize_filename_part(s: str) -> str:
+    """Make a single name component safe for Windows paths.
+
+    Replaces illegal chars with '_' and trims leading/trailing dots/spaces so we
+    never produce 'K.O..flac' or '.hidden' style names. This mirrors what
+    deemix/sockseek already do for on-disk names.
+    """
+    if not s:
+        return ""
+    cleaned = _ILLEGAL_FILENAME.sub("_", s).strip()
+    return cleaned.strip(".").strip()
+
+
+def format_canonical_name(artists: list[str], title: str) -> str:
+    """Build the on-disk filename STEM from Spotify's structured data.
+
+    This is the single source of truth for naming -- NOT the downloader's own
+    output filename (deemix/sockseek name however they please). We take the
+    primary artist (artists[0]) + the Spotify title, which is exactly the clean
+    'Artist - Title' shape already used on disk, and sanitize it for Windows.
+
+    Using only artists[0] (not the full joined list) deliberately avoids the
+    bloated 'Axel Boman Kasper Bjørke' form Spotify's artist field carries when
+    a remixer is listed as a second artist -- the remixer already lives in the
+    title for those tracks. Returns '' if there is no usable title, signalling
+    the caller to keep the existing stem rather than blank the name.
+    """
+    title_part = _sanitize_filename_part(title or "")
+    if not title_part:
+        return ""
+    artist_part = _sanitize_filename_part(artists[0]) if artists else ""
+    return f"{artist_part} - {title_part}" if artist_part else title_part
+
+
 def _read_title_tag(path: Path) -> str | None:
     """Return the file's TITLE tag (FLAC Vorbis TITLE or MP3 TIT2), else None.
 
@@ -66,9 +104,12 @@ def _is_complete_audio(path: Path) -> bool:
 
     deemix writes a tag block up front, so a partial/interrupted download
     still parses and may even carry a placeholder tag -- but its TITLE/ALBUM
-    are blank. Requiring real TITLE + ALBUM values is the reliable "is this
-    download finished" signal. Vorbis (FLAC) keys are TITLE/ALBUM; ID3 (MP3)
-    keys are TIT2/TALB -- check both.
+    are blank. Requiring real TITLE + (ALBUM or SOURCE) values is the reliable
+    "is this download finished" signal. SOURCE is the dedicated download-source
+    tag (FLAC Vorbis 'SOURCE' / MP3 TXXX 'SOURCE') -- its presence proves the
+    file was fully tagged by our pipeline, so a missing ALBUM no longer means
+    "partial". Vorbis (FLAC) keys are TITLE/ALBUM/SOURCE; ID3 (MP3) keys are
+    TIT2/TALB/TXXX(SOURCE) -- check both.
     """
     if not path.is_file():
         return False
@@ -86,7 +127,19 @@ def _is_complete_audio(path: Path) -> bool:
                     return True
             return False
 
-        return has("TITLE", "title", "TIT2") and has("ALBUM", "album", "TALB")
+        # MP3 stores SOURCE in a TXXX frame described 'SOURCE'
+        def has_source():
+            if has("SOURCE"):
+                return True
+            for k in (tags.keys() if hasattr(tags, "keys") else []):
+                if str(k).upper().startswith("TXXX") and tags[k]:
+                    val = tags[k]
+                    desc = val[0] if isinstance(val, list) else val
+                    if "SOURCE" in str(desc).upper():
+                        return True
+            return False
+
+        return has("TITLE", "title", "TIT2") and (has("ALBUM", "album", "TALB") or has_source())
     except Exception:
         return False
 
@@ -256,17 +309,25 @@ def find_partial_track(out_dir: Path, artists: list[str], title: str) -> Path | 
 # tag + rename
 # ---------------------------------------------------------------------------
 
-def tag_and_rename(flac_path: Path, position: int, total: int) -> Path:
+def tag_and_rename(flac_path: Path, position: int, total: int, track: "Track | None" = None) -> Path:
     """Set the playlist position (NN) in the file's tag and ensure the
-    filename is the bare core name, preserving the real audio extension.
+    filename is the canonical 'Artist - Title' name derived from Spotify's
+    structured data (track.artists / track.name) -- NOT from whatever stem the
+    downloader emitted.
 
     FLAC uses Vorbis comments (TRACKNUMBER); MP3 uses ID3 (TRCK). Windows
     Explorer's '#' column and the Denon Prime 4 both read these for playlist
-    ordering. The position lives in the tag, not the filename, so the on-disk
-    name stays clean (e.g. 'Eddie C - X.flac' or 'Eddie C - X.mp3'). The
-    extension is taken from the file itself -- an MP3 must stay .mp3.
+    ordering. The position lives in the tag, not the filename. The extension is
+    taken from the file itself -- an MP3 must stay .mp3.
+
+    If `track` is unavailable we fall back to preserving the existing stem (the
+    old behaviour) so a missing-metadata edge case can never blank a filename.
     """
-    core = flac_path.stem
+    if track is not None:
+        canonical = format_canonical_name(track.artists, track.name)
+    else:
+        canonical = ""
+    core = canonical or flac_path.stem
     target_name = f"{core}{flac_path.suffix}"
     # already correctly named? just ensure the tag is right
     if flac_path.name == target_name:
@@ -335,7 +396,7 @@ def playlist_lock(out_dir: Path) -> threading.Lock:
         return lock
 
 
-def write_meta(out_dir: Path, spotify_url: str, spotify_id: str, name: str, tracks: list[Track], statuses: list[str], sources: dict[int, str] | None = None) -> Path:
+def write_meta(out_dir: Path, spotify_url: str, spotify_id: str, name: str, tracks: list[Track], statuses: list[str], sources: dict[int, str] | None = None, provenance: dict[int, dict] | None = None) -> Path:
     """Write playlist.meta.json into the playlist folder so a future sync cron
     can re-query Spotify and download only tracks not already fetched.
 
@@ -350,6 +411,8 @@ def write_meta(out_dir: Path, spotify_url: str, spotify_id: str, name: str, trac
     import time as _time
     if sources is None:
         sources = {}
+    if provenance is None:
+        provenance = {}
     out_dir.mkdir(parents=True, exist_ok=True)
     meta = {
         "spotify_url": spotify_url,
@@ -362,10 +425,17 @@ def write_meta(out_dir: Path, spotify_url: str, spotify_id: str, name: str, trac
         meta["tracks"].append({
             "position": t.position,
             "spotify_uri": t.spotify_uri,
-            "artist": " ".join(t.artists),
+            # Structured source of truth: keep the artist LIST (single field of
+            # truth). Downstream consumers use `artists`; the old flattened
+            # `artist` string was dropped to avoid a second out-of-sync copy.
+            "artists": list(t.artists),
             "title": t.name,
+            "album": t.album,
             "status": st,
             "source": sources.get(t.position, "deezer"),
+            # Downloader's own view of this track (Deezer match / Soulseek tag),
+            # recorded for reference/provenance. Absent until a file lands.
+            "provenance": provenance.get(t.position),
         })
     path = out_dir / "playlist.meta.json"
     path.write_text(
@@ -375,7 +445,7 @@ def write_meta(out_dir: Path, spotify_url: str, spotify_id: str, name: str, trac
     return path
 
 
-def update_track_sources(out_dir: Path, sources: dict[int, str]) -> None:
+def update_track_sources(out_dir: Path, sources: dict[int, str], provenance: dict[int, dict] | None = None) -> None:
     """Rewrite the `source` provenance field of the named positions in
     playlist.meta.json, and flip their `status` to "downloaded" (a landed
     Soulseek file is, by definition, present -- leaving it "missed" while
@@ -401,4 +471,6 @@ def update_track_sources(out_dir: Path, sources: dict[int, str]) -> None:
         if pos in sources:
             tr["source"] = sources[pos]
             tr["status"] = "downloaded"
+            if provenance and pos in provenance:
+                tr["provenance"] = provenance[pos]
     path.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")

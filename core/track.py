@@ -15,3 +15,4 @@ class Track:
     artists: list[str]
     spotify_uri: str | None = None
     duration_ms: int | None = None
+    album: str | None = None

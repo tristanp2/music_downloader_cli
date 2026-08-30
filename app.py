@@ -64,6 +64,11 @@ from core import soulseek as soulseek_mod
 
 PORT = int(os.environ.get("MUSIC_DOWNLOADER_PORT", "8000")) 
 
+# Dev-only hot reload: when set, a background thread watches static/app.js and
+# templates/index.html and pushes a FRONTEND_RELOAD SSE event to every connected
+# tab on change. Off by default; flip it with MUSIC_DOWNLOADER_HOT_RELOAD=1.
+HOT_RELOAD = os.environ.get("MUSIC_DOWNLOADER_HOT_RELOAD", "0") == "1"
+
 REPO = Path(__file__).resolve().parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
@@ -100,6 +105,13 @@ async def lifespan(app):
     _sync_interval = float((config.read_conf(config.CONF_SETTINGS).get("sync_interval_hours") or "12") or 12)
     start_scheduler(_sync_interval)
     start_liveness_log(60)
+    _hot_reload_thread = None
+    if HOT_RELOAD:
+        # Dev-only: watch the two frontend files and push a reload event to every
+        # connected tab when either changes, so you don't have to tab back and hit
+        # F5. Gated behind MUSIC_DOWNLOADER_HOT_RELOAD so it never runs in prod.
+        _hot_reload_thread = threading.Thread(target=_frontend_watchdog, daemon=True)
+        _hot_reload_thread.start()
     try:
         yield
     finally:
@@ -261,6 +273,31 @@ def _push_job_feed(event: dict) -> None:
             # "Event loop is closed" from the worker thread at shutdown.
             return
 
+
+def _frontend_watchdog() -> None:
+    """Dev-only hot reload (see HOT_RELOAD). Poll the mtime of the two frontend
+    files every second; when either changes, broadcast FRONTEND_RELOAD so every
+    connected tab reloads itself. Runs as a daemon thread; _push_job_feed is
+    loop-safe, so the broadcast from this worker thread is fine."""
+    watch = [
+        REPO / "static" / "app.js",
+        REPO / "templates" / "index.html",
+    ]
+    mtimes = {p: p.stat().st_mtime if p.is_file() else None for p in watch}
+    core.log.info("[hot-reload] watching %d frontend file(s)", len(watch))
+    while True:
+        time.sleep(1)
+        for p in watch:
+            try:
+                new = p.stat().st_mtime if p.is_file() else None
+            except OSError:
+                continue
+            if new is not None and mtimes[p] is not None and new != mtimes[p]:
+                mtimes[p] = new
+                core.log.info("[hot-reload] %s changed -- pushing FRONTEND_RELOAD", p.name)
+                _push_job_feed({"type": "FRONTEND_RELOAD"})
+            else:
+                mtimes[p] = new
 
 
 
@@ -567,6 +604,13 @@ def _run_soulseek_drain(drain_id: str, job_ids: list[str]) -> None:
             _normalize(m.get("name") or ""): m.get("position", 0)
             for m in missed if m.get("name")
         }
+        # Spotify truth per position, so the Soulseek layout-copy can name the
+        # landed file from Spotify's artist/title (not sockseek's output name)
+        # and stamp the real (Spotify) album when the upload lacks one.
+        meta_by_pos = {
+            m.get("position"): (m.get("artists") or [], m.get("name") or "", m.get("album") or "")
+            for m in missed if m.get("position") is not None
+        }
 
         def make_handlers(job_id: str, nbp: dict):
             def on_progress(msg: str) -> None:
@@ -590,6 +634,7 @@ def _run_soulseek_drain(drain_id: str, job_ids: list[str]) -> None:
             "missed": missed,
             "total": total,
             "position_by_title": position_by_title,
+            "meta_by_pos": meta_by_pos,
             "on_progress": on_progress,
             "on_event": on_event,
         })
@@ -1063,12 +1108,16 @@ def library_track_file(request: Request, folder: str, position: int):
     t = next((x for x in tracks if x.get("position") == position), None)
     if not t:
         raise HTTPException(status_code=404, detail="no such track position")
-    flac = library.find_existing_track(fp, t.get("artist", "").split(), t.get("title", ""))
+    # Primary artist source is the structured `artists` list; fall back to the
+    # legacy flattened `artist` string (older meta files predating the list).
+    artist_terms = t.get("artists") or (t.get("artist", "") or "").split()
+    flac = library.find_existing_track(fp, artist_terms, t.get("title", ""))
     if not flac or not flac.is_file():
         raise HTTPException(status_code=404, detail="track file not found on disk")
+    media_type = "audio/mpeg" if flac.suffix.lower() == ".mp3" else "audio/flac"
     return FileResponse(
         str(flac),
-        media_type="audio/flac",
+        media_type=media_type,
         filename=flac.name,
     )
 

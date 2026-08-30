@@ -1303,6 +1303,14 @@ async function startUpdate(url)
     }
   });
 
+  eventSource.addEventListener("frontend_reload", function() 
+  {
+    // Dev hot reload: the server watched static/app.js or templates/index.html
+    // change and asked every tab to refresh. No-op in production (server never
+    // sends this event unless MUSIC_DOWNLOADER_HOT_RELOAD=1).
+    location.reload();
+  });
+
   eventSource.onopen = function() 
   {
     setBadge(true);

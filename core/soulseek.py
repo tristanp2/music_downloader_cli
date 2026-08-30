@@ -16,9 +16,10 @@ Design notes (see SOULSEEK_FALLBACK_PLAN.md):
     mode -- that would require Spotify dev-app credentials for no gain, since
     we already have the tracklist.
   * Files land in sockseek's own output dir in ITS naming, then this module
-    moves + re-tags them into the bare `Artist - Title.flac` layout the
-    downloader/exporter expect (TRACKNUMBER for crate ordering, ALBUM so the
-    sync completeness gate doesn't purge them as partials).
+    copies them into the `Artist - Title` layout derived from Spotify's
+    structured artist/title (see core.library.format_canonical_name) -- NOT from
+    sockseek's filename. TRACKNUMBER + ALBUM are stamped for crate ordering and
+    so the sync completeness gate doesn't purge them as partials.
   * A ffprobe lossless gate rejects ~320 kbps files shared under a `.flac`
     name (fake FLAC) -- those stay `missed` for Deezer to chase later.
   * Provenance: every landed file gets its meta `source` flipped to 'soulseek'.
@@ -43,6 +44,7 @@ from .library import (
     _core_artist_title,
     _is_complete_audio,
     _normalize,
+    format_canonical_name,
     playlist_lock,
     update_track_sources,
 )
@@ -181,27 +183,84 @@ def _resolve_position_by_containment(norm_file_title: str, position_by_title: di
     return None
 
 
-def _tag_for_layout(path: Path, position: int, total: int) -> None:
-    """Set TRACKNUMBER (crate ordering) + ALBUM (completeness) on the landed
-    file. ALBUM is required so the sync completeness gate (_is_complete_audio)
-    doesn't treat this as a partial and purge it. We can't know the real album
-    from Soulseek, so we stamp a stable sentinel; the exporter only needs a
-    non-empty ALBUM to render the crate.
+def _read_soulseek_title_tag(path: Path) -> str | None:
+    """Read the landed file's TITLE tag (for provenance record only)."""
+    try:
+        from mutagen.flac import FLAC
+        from mutagen.easyid3 import EasyID3
+        if path.suffix.lower() == ".flac":
+            audio = FLAC(str(path))
+            v = audio.get("TITLE")
+        else:
+            audio = EasyID3(str(path))
+            v = audio.get("title")
+        if v:
+            return str(v[0]) if isinstance(v, list) else str(v)
+    except Exception:
+        return None
+    return None
+
+
+def _read_soulseek_artist_tag(path: Path) -> str | None:
+    """Read the landed file's ARTIST tag (for provenance record only)."""
+    try:
+        from mutagen.flac import FLAC
+        from mutagen.easyid3 import EasyID3
+        if path.suffix.lower() == ".flac":
+            audio = FLAC(str(path))
+            v = audio.get("ARTIST")
+        else:
+            audio = EasyID3(str(path))
+            v = audio.get("artist")
+        if v:
+            return str(v[0]) if isinstance(v, list) else str(v)
+    except Exception:
+        return None
+    return None
+
+
+def _tag_for_layout(path: Path, position: int, total: int, album: str | None = None) -> None:
+    """Set TRACKNUMBER (crate ordering) + SOURCE (download provenance) on the
+    landed file, and ALBUM only when it isn't already present.
+
+    SOURCE is a dedicated Vorbis 'SOURCE' comment (FLAC) / TXXX frame described
+    'SOURCE' (MP3) -- NOT the ALBUM tag. Previously we stamped ALBUM="Soulseek"
+    as a sentinel, which clobbered the real album. Now:
+      * SOURCE records where the file came from (so the completeness gate and any
+        future source query can see it without hijacking ALBUM).
+      * ALBUM is preserved if the upload already carried one; otherwise we fall
+        back to the Spotify album (when known), and only leave it blank if both
+        are absent -- the completeness gate now also accepts SOURCE as proof the
+        file is fully tagged.
     """
     try:
         if path.suffix.lower() == ".mp3":
-            from mutagen.easyid3 import EasyID3
-            audio = EasyID3(str(path))
+            # Use ONE raw ID3 object for every frame so a second save can't drop
+            # what the first wrote. EasyID3 + raw ID3 double-write was silently
+            # discarding the album frame.
+            from mutagen.id3 import ID3, TXXX, TRCK, TALB
+            id3 = ID3(str(path), v2_version=3)
             if position:
-                audio["tracknumber"] = f"{position:0{len(str(total))}d}"
-            audio["album"] = "Soulseek"
-            audio.save()
+                id3.add(TRCK(encoding=3, text=f"{position:0{len(str(total))}d}"))
+            # preserve existing album; else fall back to Spotify album
+            existing_album = id3.get("TALB")
+            if (not existing_album or not existing_album.text) and album:
+                id3.add(TALB(encoding=3, text=album))
+            # SOURCE provenance (replace any prior value)
+            for old in id3.getall("TXXX"):
+                if old.desc == "SOURCE":
+                    id3.delall("TXXX")
+                    break
+            id3.add(TXXX(encoding=3, desc="SOURCE", text="Soulseek"))
+            id3.save(str(path), v2_version=3)
         else:
             from mutagen.flac import FLAC
             audio = FLAC(str(path))
             if position:
                 audio["TRACKNUMBER"] = f"{position:0{len(str(total))}d}"
-            audio["ALBUM"] = "Soulseek"
+            if not audio.get("ALBUM") and album:
+                audio["ALBUM"] = album
+            audio["SOURCE"] = "Soulseek"
             audio.save()
     except Exception:
         pass  # tag best-effort; the file is already in place
@@ -485,8 +544,10 @@ def run_soulseek_drain(specs: list[dict], work_dir: Path) -> dict:
         out_dir = spec["out_dir"]
         out_dir.mkdir(parents=True, exist_ok=True)
         pbt = spec["position_by_title"]
+        meta_by_pos = spec.get("meta_by_pos", {})
         total = spec["total"]
         landed_positions: set[int] = set()
+        provenance: dict[int, dict] = {}
         for f in landed_files:
             _, file_title = _core_artist_title(f.stem)
             norm = _normalize(file_title)
@@ -495,17 +556,37 @@ def run_soulseek_drain(specs: list[dict], work_dir: Path) -> dict:
                 pos = _resolve_position_by_containment(norm, pbt)
             if pos is None:
                 continue
-            target = out_dir / f"{f.stem}{f.suffix}"
+            # Name from Spotify's data (the source of truth), NOT sockseek's
+            # output filename. Falls back to the landed stem if meta is missing.
+            meta_artists, meta_title, meta_album = meta_by_pos.get(pos, ([], "", ""))
+            canonical = format_canonical_name(meta_artists, meta_title)
+            core = canonical or f.stem
+            target = out_dir / f"{core}{f.suffix}"
             try:
                 shutil.copy2(f, target)
             except Exception as e:
                 if log:
                     log.warning("[soulseek] could not copy %s -> %s: %s", f.name, target, e)
                 continue
-            _tag_for_layout(target, pos, total)
+            _tag_for_layout(target, pos, total, meta_album)
             landed_positions.add(pos)
+            # Record the downloader's own view (the landed file's real tag) for
+            # reference/provenance, alongside Spotify's truth in the meta.
+            tag_title = _read_soulseek_title_tag(f)
+            tag_artist = _read_soulseek_artist_tag(f)
+            provenance[pos] = {
+                "source": "soulseek",
+                "original_filename": f.name,
+                "tag_title": tag_title,
+                "tag_artist": tag_artist,
+                "filename": target.name,
+            }
         if landed_positions:
-            update_track_sources(out_dir, {p: "soulseek" for p in landed_positions})
+            update_track_sources(
+                out_dir,
+                {p: "soulseek" for p in landed_positions},
+                provenance=provenance,
+            )
         results[idx] = {
             "ok": True,
             "downloaded": len(landed_positions),

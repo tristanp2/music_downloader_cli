@@ -136,6 +136,10 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
     except Exception:
         prior_sources = {}
 
+    # Per-track provenance captured from the downloader's own view, recorded in
+    # playlist.meta.json for reference (Spotify stays the source of truth).
+    provenance: dict[int, dict] = {}
+
     # emit full track list upfront so the UI can render all rows immediately
     event({
         "type": JobEventType.TRACKS,
@@ -254,12 +258,20 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
         flac = deemix_download(dz, dz_url, settings, out_dir, label,
                                on_progress=on_progress, on_pct=pct_hook if on_event else None)
         if flac:
-            final = tag_and_rename(flac, pos, total)
+            final = tag_and_rename(flac, pos, total, t)
             report(f"    [deezer] downloaded -> {final.name}")
             event({'type': JobEventType.DONE, 'pos': pos, 'status': DownloadStatus.DOWNLOADED, 'pct': 100})
             statuses.append('downloaded')
             # Freshly fetched from Deezer this pass -> provenance is deezer.
             sources[pos] = 'deezer'
+            provenance[pos] = {
+                "source": "deezer",
+                "deezer_title": matched_track.get("title"),
+                "deezer_artist": _dz_field(matched_track, "artist", "name"),
+                "deezer_id": matched_track.get("id"),
+                "deezer_url": dz_url,
+                "filename": final.name,
+            }
             downloaded += 1
         else:
             report("    [deezer] download failed")
@@ -273,7 +285,7 @@ def run_playlist(url: str, dz: "Deezer", settings: dict, work_dir: Path | None =
     try:
         # Pass sources so the regenerated meta keeps prior Soulseek provenance
         # (a re-download must NOT rewrite soulseek tracks as deezer).
-        meta_path = write_meta(out_dir, url, pid, pl_name, tracks, statuses, sources=sources)
+        meta_path = write_meta(out_dir, url, pid, pl_name, tracks, statuses, sources=sources, provenance=provenance)
         report(f"[*] wrote {meta_path.name}")
     except Exception as e:
         report(f"[warn] could not write playlist.meta.json: {e}")

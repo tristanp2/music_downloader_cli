@@ -239,12 +239,14 @@ def parse_spotify_playlist(token: str, playlist_id: str) -> PlaylistData:
                         arts.append(piece)
             if tn:
                 position += 1
+                album_name = (t.get("album") or {}).get("name") if isinstance(t.get("album"), dict) else None
                 tracks.append(Track(
                     position=position,
                     name=tn,
                     artists=arts,
                     spotify_uri=t.get("spotify_uri"),
                     duration_ms=t.get("duration_ms"),
+                    album=album_name,
                 ))
         url = page.get("next")
         if not url:
